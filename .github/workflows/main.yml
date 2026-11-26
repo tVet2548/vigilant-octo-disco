@@ -1,0 +1,60 @@
+name: Extract and Force Commit Chess4
+
+on:
+  push:
+    paths:
+      - 'Chess4.zip'
+  workflow_dispatch: # Cho phép bấm chạy thủ công trên tab Actions
+
+permissions:
+  contents: write # Cấp quyền ghi để commit và push lên repo
+
+jobs:
+  extract-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Lấy đầy đủ lịch sử git để tránh lỗi khi force push
+
+      - name: Process Chess4.zip
+        run: |
+          # 1. Tìm file Chess4.zip tại thư mục gốc (root)
+          if [ ! -f "./imz.zip" ]; then
+            echo "Không tìm thấy Chess4.zip ở thư mục gốc."
+            exit 1
+          fi
+
+          # 2. Giải nén (ghi đè nếu file đã tồn tại)
+          unzip -o ./imz.zip -d ./
+
+          # 3. Cấu hình Git bot
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@://github.com"
+
+          # 4. Stage toàn bộ file vừa giải nén (tạm loại trừ Chess4.zip để xử lý sau)
+          git add -A
+          git reset -- imz.zip
+
+          # 5. Commit và Force Push nếu có thay đổi
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: extract Chess4.zip"
+            
+            # Nếu push thành công thì xóa Chess4.zip và cập nhật lại commit
+            if git push --force origin HEAD:${{ github.ref_name }}; then
+              rm -f ./imz.zip
+              git add -A
+              git commit --amend --no-edit
+              git push --force origin HEAD:${{ github.ref_name }}
+              echo "Giải nén, push thành công và đã xóa Chess4.zip."
+            else
+              echo "Lỗi: Force push thất bại."
+              exit 1
+            fi
+          else
+            echo "Không có thay đổi mới sau khi giải nén."
+            exit 1
+          fi
+          
