@@ -1,0 +1,6 @@
+id=portable_stealth_ksu
+name=Portable Stealth KSU All-in-One
+version=v1.0.0
+versionCode=100
+author=DroidPort
+description=Scrubs QEMU/VirtIO/x86/Bliss/Lineage traces, wraps eth0 as Home_WiFi_5G wlan0, and simulates natural discharging battery (75%-88%).
