@@ -133,6 +133,7 @@ CURRENT_BYTES=$(stat -c%s "${RAW_SYS}")
 NEW_SIZE_MB=$(( (CURRENT_BYTES / 1024 / 1024) + 512 ))
 truncate -s "${NEW_SIZE_MB}M" "${RAW_SYS}"
 resize2fs "${RAW_SYS}"
+e2fsck -f -y "${RAW_SYS}" || true
 
 echo "=== [3/5] Mounting system.img, Verifying x86_64 API 33 + GApps, Bridging Bliss 16.9 HALs & PID-1 Wrapper ==="
 mount -o loop,rw "${RAW_SYS}" "${WORK_DIR}/mnt"
@@ -345,31 +346,44 @@ EOF
       [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ] && CIL_LIST+=("${VEN_SE_DIR}/vendor_sepolicy.cil")
 
       if [ "${#CIL_LIST[@]}" -gt 0 ]; then
-        echo "Validating combined API-33 SELinux CIL policy with secilc (${#CIL_LIST[@]} files)..."
-        if secilc -M true -G -N -c 30 "${CIL_LIST[@]}" -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc.err"; then
+        echo "Validating combined API-33 SELinux CIL policy with secilc -m (${#CIL_LIST[@]} files)..."
+        if secilc -m -M true -G -N -c 30 "${CIL_LIST[@]}" -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc.err"; then
           echo "Verified SELinux CIL compilation succeeded cleanly!"
           rm -f "${WORK_DIR}/test_policy"
         else
-          echo "WARNING: secilc failed on mixed LineageOS 20 + Bliss 16.9 CIL files:"
+          echo "WARNING: secilc -m failed on mixed LineageOS 20 + Bliss 16.9 CIL files:"
           head -n 25 "${WORK_DIR}/secilc.err" || true
-          echo "Aligning vendor_sepolicy.cil & plat_pub_versioned.cil to prevent Android SetupSelinux FatalReboot..."
-          if [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ]; then
-            mv -f "${VEN_SE_DIR}/vendor_sepolicy.cil" "${VEN_SE_DIR}/vendor_sepolicy.cil.orig"
-            : > "${VEN_SE_DIR}/vendor_sepolicy.cil"
-          fi
-          if [ -f "${VEN_SE_DIR}/plat_pub_versioned.cil" ]; then
-            mv -f "${VEN_SE_DIR}/plat_pub_versioned.cil" "${VEN_SE_DIR}/plat_pub_versioned.cil.orig"
-            : > "${VEN_SE_DIR}/plat_pub_versioned.cil"
-          fi
-          if secilc -M true -G -N -c 30 \
+          SYS_ONLY_OK=0
+          if secilc -m -M true -G -N -c 30 \
             "${SYS_SE_DIR}/plat_sepolicy.cil" \
             $([ -n "${PLAT_VER}" ] && [ -f "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil" ] && echo "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil") \
-            "${VEN_SE_DIR}/vendor_sepolicy.cil" \
-            -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc_retry.err"; then
-            echo "Reconciled SELinux CIL graph compiled cleanly!"
-            rm -f "${WORK_DIR}/test_policy"
+            -o "${WORK_DIR}/test_sys_policy" -f /dev/null 2>"${WORK_DIR}/secilc_sys.err"; then
+            SYS_ONLY_OK=1
+            rm -f "${WORK_DIR}/test_sys_policy"
+          fi
+
+          if [ "${SYS_ONLY_OK}" -eq 1 ]; then
+            echo "Aligning conflicting vendor_sepolicy.cil & plat_pub_versioned.cil to prevent Android SetupSelinux FatalReboot..."
+            if [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ]; then
+              mv -f "${VEN_SE_DIR}/vendor_sepolicy.cil" "${VEN_SE_DIR}/vendor_sepolicy.cil.orig"
+              : > "${VEN_SE_DIR}/vendor_sepolicy.cil"
+            fi
+            if [ -f "${VEN_SE_DIR}/plat_pub_versioned.cil" ]; then
+              mv -f "${VEN_SE_DIR}/plat_pub_versioned.cil" "${VEN_SE_DIR}/plat_pub_versioned.cil.orig"
+              : > "${VEN_SE_DIR}/plat_pub_versioned.cil"
+            fi
+            if secilc -m -M true -G -N -c 30 \
+              "${SYS_SE_DIR}/plat_sepolicy.cil" \
+              $([ -n "${PLAT_VER}" ] && [ -f "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil" ] && echo "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil") \
+              "${VEN_SE_DIR}/vendor_sepolicy.cil" \
+              -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc_retry.err"; then
+              echo "Reconciled SELinux CIL graph compiled cleanly!"
+              rm -f "${WORK_DIR}/test_policy"
+            else
+              cat "${WORK_DIR}/secilc_retry.err" || true
+            fi
           else
-            cat "${WORK_DIR}/secilc_retry.err" || true
+            echo "Note: Host secilc differs from Android on-device secilc; preserving Bliss 16.9 vendor CILs intact."
           fi
         fi
       fi
@@ -430,7 +444,9 @@ static void ensure_byname_link(const char *name, const char *target) {
     if (access(target, F_OK) == 0) {
         snprintf(path, sizeof(path), "/dev/block/by-name/%s", name);
         unlink(path);
-        symlink(target, path);
+        if (symlink(target, path) != 0) {
+            (void)errno;
+        }
     }
 }
 
