@@ -1,0 +1,323 @@
+name: Build Portable Android 13 (LineageOS 20 GApps x86_64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      lineage_gsi_url:
+        description: "Optional direct URL for LineageOS 20.0 GApps x86_64 system image (.img/.xz/.zip)"
+        required: false
+        default: ""
+      bliss_iso_url:
+        description: "Optional direct URL for Bliss OS 16.9 (Android 13 / API 33) x86_64 ISO"
+        required: false
+        default: ""
+      ksu_kernel_url:
+        description: "Optional direct URL for prebuilt x86_64 KernelSU Next bzImage"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  BUNDLE_DIR: dist_bundle
+  ARCHIVE_PATH: dist/Portable_Android13_Win11.7z
+
+jobs:
+  build-windows-launcher:
+    name: Build Native AndroidLauncher.exe (Windows 11 / Python 3.11)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Set Up Python 3.11 (Native Windows x64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-win.txt
+
+      - name: 3. Install GUI, DnD & PyInstaller Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-win.txt
+
+      - name: 4. Check or Generate Windows App Icon (assets/app.ico)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "assets/app.ico") -or ((Get-Item "assets/app.ico").Length -eq 0)) {
+            python scripts/generate_icon.py assets/app.ico
+          }
+          if (-not (Test-Path "assets/app.ico")) { throw "assets/app.ico generation failed" }
+
+      - name: 5. Compile Native AndroidLauncher.exe via PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --console `
+            --icon=assets/app.ico `
+            --name AndroidLauncher `
+            --collect-all customtkinter `
+            --collect-all tkinterdnd2 `
+            --add-data "src/spoof_device.py;." `
+            src/launcher.py
+          $exe = Get-Item "dist/AndroidLauncher.exe"
+          Write-Host "Built native AndroidLauncher.exe ($($exe.Length) bytes)"
+          if ($exe.Length -lt 5242880) { throw "AndroidLauncher.exe is unexpectedly small" }
+
+      - name: 6. Upload Native Launcher Executable (~25 MB)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-launcher-win64
+          path: dist/AndroidLauncher.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  build-portable-android:
+    name: Build Portable Android 13 Bundle (Windows 11 / i5-3475S / HD 4000)
+    needs: build-windows-launcher
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Reclaim Runner Disk Space (>= 45 GB Free)
+        shell: bash
+        run: |
+          chmod +x scripts/cleanup_disk.sh
+          sudo bash scripts/cleanup_disk.sh
+
+      - name: 3. Install Linux Build, Image & Fallback Packaging Tools
+        shell: bash
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            p7zip-full qemu-utils e2fsprogs android-sdk-libsparse-utils \
+            squashfs-tools erofs-utils xorriso aria2 curl wget jq ca-certificates \
+            python3 python3-pip python3-pil file gawk kmod libncurses-dev \
+            bc bison flex libelf-dev libssl-dev build-essential libc6-dev cpio zstd lz4 xz-utils \
+            lld clang llvm binutils-x86-64-linux-gnu secilc \
+            wine wine64 wine32 winbind xvfb cabextract
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h /
+
+      - name: 4. Check or Generate Windows App Icon (assets/app.ico)
+        shell: bash
+        run: |
+          if [ -s "assets/app.ico" ]; then
+            echo "Found existing assets/app.ico ($(stat -c%s assets/app.ico) bytes); using directly."
+          else
+            echo "assets/app.ico not found; generating default icon with Pillow..."
+            python3 scripts/generate_icon.py assets/app.ico
+          fi
+          test -s "assets/app.ico"
+
+      - name: 5. Fetch QEMU (WHPX + VirGL + ANGLE), scrcpy, ADB & Spoof Modules
+        shell: bash
+        run: |
+          mkdir -p "${BUNDLE_DIR}/bin/scrcpy" "${BUNDLE_DIR}/images/profiles" "${BUNDLE_DIR}/modules" "${BUNDLE_DIR}/assets"
+          cp -f assets/app.ico "${BUNDLE_DIR}/assets/app.ico"
+          chmod +x scripts/fetch_assets.sh
+          bash scripts/fetch_assets.sh "${BUNDLE_DIR}"
+          df -h /
+
+      - name: 6. Extract Bliss OS 16.9 (API 33) Base, x86_64 ksud & Build Matched KernelSU Next (ikconfig)
+        shell: bash
+        env:
+          BLISS_ISO_URL: ${{ github.event.inputs.bliss_iso_url }}
+          KSU_KERNEL_URL: ${{ github.event.inputs.ksu_kernel_url }}
+        run: |
+          chmod +x scripts/build_ksu_kernel.sh
+          sudo -E bash scripts/build_ksu_kernel.sh "${BUNDLE_DIR}"
+          df -h /
+
+      - name: 7. Patch LineageOS 20.0 GApps (API 33), Build Dual Initrd & Pre-Format 16GB ext4 Data
+        shell: bash
+        env:
+          LINEAGE_GSI_URL: ${{ github.event.inputs.lineage_gsi_url }}
+        run: |
+          chmod +x scripts/patch_system_img.sh
+          sudo -E bash scripts/patch_system_img.sh "${BUNDLE_DIR}"
+          RAW_DATA="/tmp/data_clean.raw"
+          rm -f "${RAW_DATA}" "${BUNDLE_DIR}/images/data.img" "${BUNDLE_DIR}/images/data_clean.qcow2"
+          truncate -s 16G "${RAW_DATA}"
+          mkfs.ext4 -F -L data "${RAW_DATA}"
+          e2fsck -f -y "${RAW_DATA}" || true
+          qemu-img convert -c -O qcow2 "${RAW_DATA}" "${BUNDLE_DIR}/images/data_clean.qcow2"
+          cp -f "${BUNDLE_DIR}/images/data_clean.qcow2" "${BUNDLE_DIR}/images/data.img"
+          rm -f "${RAW_DATA}"
+          df -h /
+
+      - name: 8a. Download Native Windows AndroidLauncher.exe
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-launcher-win64
+          path: dist_bundle
+
+      - name: 8b. Verify AndroidLauncher.exe (Auto-Fallback to Wine Builder if Missing)
+        shell: bash
+        run: |
+          EXE_PATH="${BUNDLE_DIR}/AndroidLauncher.exe"
+          EXE_SIZE=$(stat -c%s "${EXE_PATH}" 2>/dev/null || echo 0)
+          if [ "${EXE_SIZE}" -ge 5242880 ]; then
+            echo "Using native Windows-compiled AndroidLauncher.exe (${EXE_SIZE} bytes)."
+          else
+            echo "Native AndroidLauncher.exe not present; falling back to Wine PyInstaller build..."
+            chmod +x scripts/build_exe_wine.sh
+            bash scripts/build_exe_wine.sh "${BUNDLE_DIR}"
+          fi
+          cp -f README.md "${BUNDLE_DIR}/README_WINDOWS.txt"
+
+      - name: 8.5. Automated Verification (Images, x86_64 KSU Initrd, GApps & 16GB Data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG_DIR="${BUNDLE_DIR}/images"
+          echo "=== [Verify 1/5] Verifying Kernels (kernel_stock & kernel_ksunext) ==="
+          for K in kernel_stock kernel_ksunext; do
+            test -s "${IMG_DIR}/${K}"
+            K_TYPE=$(file -b "${IMG_DIR}/${K}")
+            echo "  ${K}: $(stat -c%s "${IMG_DIR}/${K}") bytes -> ${K_TYPE}"
+            echo "${K_TYPE}" | grep -qiE 'bzImage|Linux kernel x86'
+          done
+
+          echo "=== [Verify 2/5] Verifying Dual Initrd Pair (initrd_stock.img & initrd_ksunext.img) ==="
+          extract_cpio_img() {
+            local IN_IMG="$1"
+            local OUT_DIR="$2"
+            rm -rf "${OUT_DIR}"
+            mkdir -p "${OUT_DIR}"
+            local MAGIC
+            MAGIC=$(file -b "${IN_IMG}")
+            if echo "${MAGIC}" | grep -qi "XZ"; then
+              xz -dc "${IN_IMG}" | (cd "${OUT_DIR}" && cpio -idm --no-absolute-filenames >/dev/null 2>&1)
+            elif echo "${MAGIC}" | grep -qi "LZ4"; then
+              lz4 -dc "${IN_IMG}" | (cd "${OUT_DIR}" && cpio -idm --no-absolute-filenames >/dev/null 2>&1)
+            elif echo "${MAGIC}" | grep -qi "Zstandard"; then
+              zstd -dc "${IN_IMG}" | (cd "${OUT_DIR}" && cpio -idm --no-absolute-filenames >/dev/null 2>&1)
+            else
+              gzip -dc "${IN_IMG}" | (cd "${OUT_DIR}" && cpio -idm --no-absolute-filenames >/dev/null 2>&1)
+            fi
+          }
+
+          extract_cpio_img "${IMG_DIR}/initrd_stock.img" "/tmp/verify_initrd_stock"
+          test ! -e "/tmp/verify_initrd_stock/sbin/ksud"
+          grep -q "droidport_init_wrapper" "/tmp/verify_initrd_stock/init"
+          echo "  initrd_stock.img: OK (clean stock, no ksud, wrapper hooked)"
+
+          extract_cpio_img "${IMG_DIR}/initrd_ksunext.img" "/tmp/verify_initrd_ksu"
+          test -x "/tmp/verify_initrd_ksu/sbin/ksud"
+          KSUD_TYPE=$(file -b "/tmp/verify_initrd_ksu/sbin/ksud")
+          echo "  initrd_ksunext.img /sbin/ksud: ${KSUD_TYPE}"
+          echo "${KSUD_TYPE}" | grep -qiE 'ELF 64-bit.*x86-64'
+          ! echo "${KSUD_TYPE}" | grep -qiE 'ARM|aarch64'
+          grep -q "droidport_init_wrapper" "/tmp/verify_initrd_ksu/init"
+          rm -rf /tmp/verify_initrd_stock /tmp/verify_initrd_ksu
+
+          echo "=== [Verify 3/5] Verifying system.img (x86_64, API 33, Wrapper, GApps) ==="
+          sudo mkdir -p /tmp/verify_sys_mnt /tmp/verify_ven_mnt
+          qemu-img convert -O raw "${IMG_DIR}/system.img" /tmp/verify_sys.raw
+          sudo mount -o loop,ro /tmp/verify_sys.raw /tmp/verify_sys_mnt
+          SYS_BIN_INIT="/tmp/verify_sys_mnt/system/bin/init"
+          [ -e "${SYS_BIN_INIT}" ] || SYS_BIN_INIT="/tmp/verify_sys_mnt/bin/init"
+          test -x "${SYS_BIN_INIT}"
+          INIT_TYPE=$(file -b "${SYS_BIN_INIT}")
+          echo "  system init: ${INIT_TYPE}"
+          echo "${INIT_TYPE}" | grep -qiE 'ELF 64-bit.*x86-64'
+          test -x "/tmp/verify_sys_mnt/sbin/droidport_init_wrapper"
+          WRAP_TYPE=$(file -b "/tmp/verify_sys_mnt/sbin/droidport_init_wrapper")
+          echo "  droidport_init_wrapper: ${WRAP_TYPE}"
+          echo "${WRAP_TYPE}" | grep -qiE 'ELF 64-bit.*x86-64'
+          GAPPS_HITS=$(find /tmp/verify_sys_mnt -maxdepth 6 \( -iname "*Phonesky*.apk" -o -iname "*GmsCore*.apk" -o -iname "*GoogleServicesFramework*.apk" \) | wc -l)
+          echo "  GApps core APKs found: ${GAPPS_HITS}"
+          sudo umount /tmp/verify_sys_mnt
+          rm -f /tmp/verify_sys.raw
+
+          echo "=== [Verify 4/5] Verifying vendor.img (Bliss OS 16.9 API-33 HALs & fstab) ==="
+          qemu-img convert -O raw "${IMG_DIR}/vendor.img" /tmp/verify_ven.raw
+          sudo mount -o loop,ro /tmp/verify_ven.raw /tmp/verify_ven_mnt
+          test -s "/tmp/verify_ven_mnt/etc/fstab.android_x86_64"
+          test -s "/tmp/verify_ven_mnt/etc/init/hw/init.android_x86_64.rc"
+          sudo umount /tmp/verify_ven_mnt
+          rm -f /tmp/verify_ven.raw
+          sudo rmdir /tmp/verify_sys_mnt /tmp/verify_ven_mnt
+
+          echo "=== [Verify 5/5] Verifying data.img & data_clean.qcow2 (>= 8 GB virtual size) ==="
+          for D in data.img data_clean.qcow2; do
+            VSIZE=$(qemu-img info --output=json "${IMG_DIR}/${D}" | jq -r '."virtual-size"')
+            echo "  ${D} virtual-size: ${VSIZE} bytes"
+            test "${VSIZE}" -ge 8589934592
+          done
+
+      - name: 9. Verify Bundle & Ultra-Solid 7z Compression (< 1.95 GB Single File)
+        shell: bash
+        run: |
+          echo "=== Verifying Portable Bundle Contents ==="
+          test -s "${BUNDLE_DIR}/AndroidLauncher.exe"
+          test -s "${BUNDLE_DIR}/bin/qemu-system-x86_64.exe"
+          test -s "${BUNDLE_DIR}/bin/qemu-img.exe"
+          test -s "${BUNDLE_DIR}/bin/adb.exe"
+          test -s "${BUNDLE_DIR}/bin/scrcpy/scrcpy.exe"
+          test -s "${BUNDLE_DIR}/images/kernel_stock"
+          test -s "${BUNDLE_DIR}/images/kernel_ksunext"
+          test -s "${BUNDLE_DIR}/images/initrd.img"
+          test -s "${BUNDLE_DIR}/images/initrd_stock.img"
+          test -s "${BUNDLE_DIR}/images/initrd_ksunext.img"
+          test -s "${BUNDLE_DIR}/images/vendor.img"
+          test -s "${BUNDLE_DIR}/images/system.img"
+          test -s "${BUNDLE_DIR}/images/data.img"
+          test -s "${BUNDLE_DIR}/images/data_clean.qcow2"
+          test -s "${BUNDLE_DIR}/modules/KernelSU_Next.apk"
+          test -s "${BUNDLE_DIR}/modules/Portable_Stealth_KSU.zip"
+
+          ls -lh "${BUNDLE_DIR}/images"
+
+          mkdir -p dist
+          rm -f dist/Portable_Android13_Win11.7z*
+
+          echo "Compressing with 7z Ultra Solid LZMA2 (128MB dictionary)..."
+          7z a -t7z -mx=9 -m0=lzma2 -md=128m -ms=on -mmt=on "${ARCHIVE_PATH}" "./${BUNDLE_DIR}/"*
+
+          ARCHIVE_BYTES=$(stat -c%s "${ARCHIVE_PATH}")
+          LIMIT_BYTES=$((1950 * 1024 * 1024))
+          echo "Single archive size: ${ARCHIVE_BYTES} bytes (Limit: ${LIMIT_BYTES} bytes)"
+
+          if [ "${ARCHIVE_BYTES}" -gt "${LIMIT_BYTES}" ]; then
+            echo "WARNING: Archive exceeded 1.95 GB GitHub Release safety threshold; splitting into 1900m volumes..."
+            rm -f "${ARCHIVE_PATH}"
+            7z a -t7z -mx=9 -m0=lzma2 -md=128m -ms=on -mmt=on -v1900m "${ARCHIVE_PATH}" "./${BUNDLE_DIR}/"*
+          else
+            echo "OK: Single-file archive is safely under 1.95 GB."
+          fi
+
+          ls -lh dist/
+          (cd dist && sha256sum Portable_Android13_Win11.7z* > Portable_Android13_Win11.sha256)
+
+      - name: 10. Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}"
+          name: "Portable Android 13 Win11 (Build #${{ github.run_number }})"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/Portable_Android13_Win11.7z*
+            dist/Portable_Android13_Win11.sha256
+            
