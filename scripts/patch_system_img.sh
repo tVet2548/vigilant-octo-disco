@@ -741,9 +741,9 @@ out = []
 hook_inserted = False
 header_logged = False
 
-# Matches optional leading keywords, optional busybox, and switch_root/pivot syntax with any tokens
+# Matches optional leading keywords, ${SWITCH:-switch_root}, optional busybox, and switch_root syntax
 sr_re = re.compile(
-    r'^(\s*)(.*?\b)(?:busybox\s+)?switch_root\s+(\S+)\s+(\S+)(.*)$'
+    r'^(\s*)(.*?)(?:(\$\{[^}]*switch_root[^}]*\}|(?:busybox\s+)?switch_root))\s+(\S+)\s+(\S+)(.*)$'
 )
 
 for i, line in enumerate(lines):
@@ -758,10 +758,10 @@ for i, line in enumerate(lines):
         out.append(f'{indent}[ -x /sbin/droidport_mount_hook.sh ] && /sbin/droidport_mount_hook.sh\n')
         m = sr_re.match(line.rstrip("\r\n"))
         if m:
-            lead, prefix, tgt, init_arg, rest = m.groups()
+            lead, prefix, sr_cmd, tgt, init_arg, rest = m.groups()
             out.append(f'{lead}if [ -x "{tgt}/sbin/droidport_init_wrapper" ]; then\n')
-            out.append(f'{lead}  echo "[INITRD] Executing: {prefix}switch_root {tgt} /sbin/droidport_init_wrapper" >/dev/ttyS0 2>/dev/null || true\n')
-            out.append(f'{lead}  {prefix}switch_root {tgt} /sbin/droidport_init_wrapper{rest}\n')
+            out.append(f'{lead}  echo "[INITRD] Executing: {prefix}{sr_cmd} {tgt} /sbin/droidport_init_wrapper" >/dev/ttyS0 2>/dev/null || true\n')
+            out.append(f'{lead}  {prefix}{sr_cmd} {tgt} /sbin/droidport_init_wrapper{rest}\n')
             out.append(f'{lead}else\n')
             out.append(f'{lead}  echo "[INITRD] WARN: wrapper missing at {tgt}/sbin/droidport_init_wrapper; running fallback" >/dev/ttyS0 2>/dev/null || true\n')
             out.append(f'{lead}  {line.strip()}\n')
@@ -793,7 +793,9 @@ PYEOF
 
   pack_initrd() {
     local SRC_ROOT="$1"
-    local OUT_IMG="$2"
+    local OUT_IMG
+    OUT_IMG="$(realpath -m "$2")"
+    mkdir -p "$(dirname "${OUT_IMG}")"
     case "${COMP_KIND}" in
       xz)
         (cd "${SRC_ROOT}" && find . | cpio -o -H newc --quiet | xz --check=crc32 -9 > "${OUT_IMG}")
