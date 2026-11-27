@@ -260,22 +260,15 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     fi
   fi
 
-  IKCFG_OK=0
-  if [ -x "./scripts/extract-ikconfig" ]; then
-    echo "Extracting embedded .config from kernel_stock via scripts/extract-ikconfig..."
-    if bash ./scripts/extract-ikconfig "${IMG_DIR}/kernel_stock" > .config 2>/dev/null && grep -q '^CONFIG_' .config; then
-      CFG_LINES=$(wc -l < .config)
-      echo "Success: extracted ${CFG_LINES} lines of kernel_stock .config!"
-      IKCFG_OK=1
-    fi
-  fi
-  if [ "${IKCFG_OK}" -eq 0 ]; then
-    echo "WARNING: extract-ikconfig returned empty; falling back to x86_64_defconfig." >&2
-    make ARCH=x86_64 x86_64_defconfig
+  echo "Generating clean QEMU/Android-13 x86_64 .config from x86_64_defconfig (+ kvm_guest.config)..."
+  make ARCH=x86_64 x86_64_defconfig
+  if [ -f "arch/x86/configs/kvm_guest.config" ]; then
+    ./scripts/kconfig/merge_config.sh -m .config arch/x86/configs/kvm_guest.config >/dev/null 2>&1 || true
   fi
 
-  # Clear distributor signing keys, enable OverlayFS Magic Mount & Kprobes, promote boot drivers to built-in (=y)
+  # Enable KernelSU-Next, OverlayFS, Android 13 Binder/DMABUF/PSI/BPF/SELinux/Netfilter, and built-in QEMU VirtIO/DRM/USB/Audio drivers
   ./scripts/config \
+    --set-str CONFIG_LOCALVERSION "-android13-ksu" \
     --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
     --set-str CONFIG_SYSTEM_REVOCATION_KEYS "" \
     --set-str CONFIG_MODULE_SIG_KEY "" \
@@ -302,6 +295,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_OVERLAY_FS_REDIRECT_DIR \
     --enable CONFIG_OVERLAY_FS_INDEX \
     --enable CONFIG_MODULES \
+    --enable CONFIG_MODULE_UNLOAD \
     --enable CONFIG_STAGING \
     --enable CONFIG_SECURITY \
     --enable CONFIG_SECURITY_NETWORK \
@@ -324,6 +318,8 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_FAIR_GROUP_SCHED \
     --enable CONFIG_CFS_BANDWIDTH \
     --enable CONFIG_RT_GROUP_SCHED \
+    --enable CONFIG_UCLAMP_TASK \
+    --enable CONFIG_UCLAMP_TASK_GROUP \
     --enable CONFIG_CGROUP_PIDS \
     --enable CONFIG_CGROUP_FREEZER \
     --enable CONFIG_CGROUP_CPUACCT \
@@ -336,32 +332,98 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_USER_NS \
     --enable CONFIG_PID_NS \
     --enable CONFIG_NET_NS \
+    --enable CONFIG_TASKSTATS \
+    --enable CONFIG_TASK_DELAY_ACCT \
+    --enable CONFIG_TASK_XACCT \
+    --enable CONFIG_TASK_IO_ACCOUNTING \
     --enable CONFIG_TMPFS \
     --enable CONFIG_TMPFS_XATTR \
     --enable CONFIG_TMPFS_POSIX_ACL \
     --enable CONFIG_MEMFD_CREATE \
     --enable CONFIG_SYNC_FILE \
-    --enable CONFIG_NETFILTER \
+    --enable CONFIG_SW_SYNC \
+    --enable CONFIG_DMA_SHARED_BUFFER \
+    --enable CONFIG_DMABUF_HEAPS \
+    --enable CONFIG_DMABUF_HEAPS_SYSTEM \
+    --enable CONFIG_UDMABUF \
     --enable CONFIG_ANDROID \
     --enable CONFIG_ANDROID_BINDER_IPC \
     --enable CONFIG_ANDROID_BINDERFS \
     --set-str CONFIG_ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
-    --enable CONFIG_ASHMEM \
     --enable CONFIG_NET \
+    --enable CONFIG_PACKET \
+    --enable CONFIG_UNIX \
+    --enable CONFIG_INET \
+    --enable CONFIG_IP_MULTICAST \
+    --enable CONFIG_IP_ADVANCED_ROUTER \
+    --enable CONFIG_IP_MULTIPLE_TABLES \
+    --enable CONFIG_IPV6 \
+    --enable CONFIG_IPV6_MULTIPLE_TABLES \
+    --enable CONFIG_IPV6_ROUTER_PREF \
+    --enable CONFIG_IPV6_ROUTE_INFO \
+    --enable CONFIG_IPV6_OPTIMISTIC_DAD \
+    --enable CONFIG_NETFILTER \
+    --enable CONFIG_NETFILTER_ADVANCED \
+    --enable CONFIG_NF_CONNTRACK \
+    --enable CONFIG_NF_CONNTRACK_MARK \
+    --enable CONFIG_NF_CONNTRACK_SECMARK \
+    --enable CONFIG_NF_NAT \
+    --enable CONFIG_NETFILTER_XTABLES \
+    --enable CONFIG_NETFILTER_XT_MARK \
+    --enable CONFIG_NETFILTER_XT_CONNMARK \
+    --enable CONFIG_NETFILTER_XT_TARGET_NFLOG \
+    --enable CONFIG_NETFILTER_XT_TARGET_NFQUEUE \
+    --enable CONFIG_NETFILTER_XT_MATCH_COMMENT \
+    --enable CONFIG_NETFILTER_XT_MATCH_CONNTRACK \
+    --enable CONFIG_NETFILTER_XT_MATCH_LENGTH \
+    --enable CONFIG_NETFILTER_XT_MATCH_LIMIT \
+    --enable CONFIG_NETFILTER_XT_MATCH_MAC \
+    --enable CONFIG_NETFILTER_XT_MATCH_MARK \
+    --enable CONFIG_NETFILTER_XT_MATCH_OWNER \
+    --enable CONFIG_NETFILTER_XT_MATCH_POLICY \
+    --enable CONFIG_NETFILTER_XT_MATCH_STATE \
+    --enable CONFIG_NETFILTER_XT_MATCH_STATISTIC \
+    --enable CONFIG_NETFILTER_XT_MATCH_STRING \
+    --enable CONFIG_NETFILTER_XT_MATCH_TIME \
+    --enable CONFIG_NETFILTER_XT_MATCH_U32 \
+    --enable CONFIG_IP_NF_IPTABLES \
+    --enable CONFIG_IP_NF_FILTER \
+    --enable CONFIG_IP_NF_TARGET_REJECT \
+    --enable CONFIG_IP_NF_NAT \
+    --enable CONFIG_IP_NF_TARGET_MASQUERADE \
+    --enable CONFIG_IP_NF_MANGLE \
+    --enable CONFIG_IP_NF_RAW \
+    --enable CONFIG_IP6_NF_IPTABLES \
+    --enable CONFIG_IP6_NF_FILTER \
+    --enable CONFIG_IP6_NF_TARGET_REJECT \
+    --enable CONFIG_IP6_NF_MANGLE \
+    --enable CONFIG_IP6_NF_RAW \
+    --enable CONFIG_NET_SCHED \
+    --enable CONFIG_NET_CLS_U32 \
+    --enable CONFIG_TUN \
+    --enable CONFIG_VETH \
+    --enable CONFIG_BRIDGE \
+    --enable CONFIG_DUMMY \
     --enable CONFIG_WIRELESS \
     --enable CONFIG_CFG80211 \
     --enable CONFIG_MAC80211 \
     --enable CONFIG_MAC80211_HWSIM \
     --enable CONFIG_VIRT_WIFI \
+    --enable CONFIG_RFKILL \
     --enable CONFIG_PCI \
     --enable CONFIG_PCI_MSI \
     --enable CONFIG_ACPI \
+    --enable CONFIG_ACPI_BATTERY \
+    --enable CONFIG_ACPI_AC \
+    --enable CONFIG_POWER_SUPPLY \
     --enable CONFIG_VIRTIO \
     --enable CONFIG_VIRTIO_PCI \
     --enable CONFIG_VIRTIO_BLK \
     --enable CONFIG_VIRTIO_NET \
     --enable CONFIG_VIRTIO_CONSOLE \
     --enable CONFIG_VIRTIO_INPUT \
+    --enable CONFIG_VIRTIO_BALLOON \
+    --enable CONFIG_HW_RANDOM_VIRTIO \
     --enable CONFIG_PRINTK \
     --enable CONFIG_PRINTK_TIME \
     --set-val CONFIG_LOG_BUF_SHIFT 18 \
@@ -382,6 +444,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --set-val CONFIG_BLK_DEV_LOOP_MIN_COUNT 16 \
     --enable CONFIG_BLK_DEV_DM \
     --enable CONFIG_DM_VERITY \
+    --enable CONFIG_DM_CRYPT \
     --enable CONFIG_BLK_DEV_RAM \
     --set-val CONFIG_BLK_DEV_RAM_SIZE 65536 \
     --enable CONFIG_RD_GZIP \
@@ -390,6 +453,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_RD_ZSTD \
     --enable CONFIG_HYPERVISOR_GUEST \
     --enable CONFIG_PARAVIRT \
+    --enable CONFIG_KVM_GUEST \
     --enable CONFIG_DRM \
     --enable CONFIG_DRM_FBDEV_EMULATION \
     --enable CONFIG_FRAMEBUFFER_CONSOLE \
@@ -398,22 +462,45 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_DRM_SIMPLEDRM \
     --enable CONFIG_FB_VESA \
     --enable CONFIG_FB_SIMPLE \
+    --enable CONFIG_USB \
+    --enable CONFIG_USB_PCI \
+    --enable CONFIG_USB_UHCI_HCD \
+    --enable CONFIG_USB_EHCI_HCD \
+    --enable CONFIG_USB_EHCI_PCI \
+    --enable CONFIG_USB_XHCI_HCD \
+    --enable CONFIG_USB_XHCI_PCI \
+    --enable CONFIG_USB_HID \
+    --enable CONFIG_HID_GENERIC \
+    --enable CONFIG_INPUT_EVDEV \
+    --enable CONFIG_INPUT_UINPUT \
     --enable CONFIG_SOUND \
     --enable CONFIG_SND \
     --enable CONFIG_SND_PCI \
     --enable CONFIG_SND_HDA_INTEL \
     --enable CONFIG_SND_HDA_GENERIC \
+    --enable CONFIG_SND_HDA_CODEC_REALTEK \
     --enable CONFIG_SND_AC97_CODEC \
+    --enable CONFIG_SND_INTEL8X0 \
     --enable CONFIG_EXT4_FS \
     --enable CONFIG_EXT4_FS_POSIX_ACL \
     --enable CONFIG_EXT4_FS_SECURITY \
     --enable CONFIG_VFAT_FS \
     --enable CONFIG_MSDOS_FS \
+    --enable CONFIG_EXFAT_FS \
     --enable CONFIG_NLS_CODEPAGE_437 \
     --enable CONFIG_NLS_ISO8859_1 \
+    --enable CONFIG_NLS_UTF8 \
     --enable CONFIG_EROFS_FS \
     --enable CONFIG_FUSE_FS \
     --enable CONFIG_SQUASHFS \
+    --enable CONFIG_SQUASHFS_XZ \
+    --enable CONFIG_SQUASHFS_LZ4 \
+    --enable CONFIG_SQUASHFS_ZSTD \
+    --enable CONFIG_F2FS_FS \
+    --enable CONFIG_RTC_CLASS \
+    --enable CONFIG_RTC_HCTOSYS \
+    --enable CONFIG_RTC_DRV_CMOS \
+    --enable CONFIG_PM_WAKELOCKS \
     --set-val CONFIG_PANIC_TIMEOUT 0 || true
 
   # Enforce baseline x86-64 CPU (no AVX2/v3), GZIP bzImage, and disable Clang LTO/CFI/IBT/TDX/SEV quirks
@@ -491,6 +578,40 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
   if ! echo "${BZ_TYPE}" | grep -qiE 'bzImage|Linux kernel x86'; then
     echo "ERROR: Built kernel_ksunext is not a valid x86 bzImage (${BZ_TYPE})!" >&2
     exit 2
+  fi
+
+  if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "Running immediate QEMU IvyBridge early-boot check on built kernel_ksunext..."
+    KSMOKE_SER="${WORK_DIR}/kernel_early_smoke.log"
+    KSMOKE_DBG="${WORK_DIR}/kernel_early_debug.log"
+    rm -f "${KSMOKE_SER}" "${KSMOKE_DBG}"
+    qemu-system-x86_64 \
+      -no-reboot -machine pc,hpet=off -smp 2 -m 1024 -accel tcg,thread=multi \
+      -cpu IvyBridge,+ssse3,+sse4.1,+sse4.2,+popcnt -display none \
+      -kernel "${IMG_DIR}/kernel_ksunext" \
+      -append "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep nokaslr panic=0" \
+      -serial "file:${KSMOKE_SER}" -d guest_errors,cpu_reset -D "${KSMOKE_DBG}" >/dev/null 2>&1 &
+    KQPID=$!
+    KOK=0
+    for _ in $(seq 1 20); do
+      if grep -q 'Linux version' "${KSMOKE_SER}" 2>/dev/null; then
+        KOK=1
+        break
+      fi
+      if ! kill -0 "${KQPID}" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    kill "${KQPID}" 2>/dev/null || true
+    wait "${KQPID}" 2>/dev/null || true
+    head -n 30 "${KSMOKE_SER}" 2>/dev/null || true
+    if [ "${KOK}" -ne 1 ]; then
+      echo "ERROR: Built kernel_ksunext failed QEMU IvyBridge earlycon check!" >&2
+      tail -n 60 "${KSMOKE_DBG}" 2>/dev/null || true
+      exit 2
+    fi
+    echo "PASSED: kernel_ksunext reached Linux earlycon cleanly under QEMU IvyBridge!"
   fi
   echo "Cleaning up kernel source tree to free runner disk space..."
   rm -rf "${KERNEL_SRC}"
