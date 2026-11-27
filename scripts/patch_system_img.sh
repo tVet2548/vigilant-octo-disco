@@ -328,7 +328,10 @@ if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
       "/dev/dri/*                0666   root       graphics" \
       "/dev/dma_heap/*           0666   system     graphics" \
       "/dev/ion                  0666   system     system" \
-      "/dev/fb*                  0660   system     graphics"; do
+      "/dev/fb*                  0660   system     graphics" \
+      "/dev/tty0                 0666   root       graphics" \
+      "/dev/ttyS*                0666   root       system" \
+      "/dev/hwrng                0444   root       system"; do
       NODE=$(echo "${ULINE}" | awk '{print $1}')
       grep -qF "${NODE}" "${WORK_DIR}/vendor_mnt/etc/ueventd.rc" 2>/dev/null || echo "${ULINE}" >> "${WORK_DIR}/vendor_mnt/etc/ueventd.rc"
     done
@@ -351,36 +354,100 @@ on late-fs
     mount_all /vendor/etc/fstab.android_x86_64 --late
 
 on boot
-    setprop ro.hwui.use_vulkan false
     setprop persist.sys.usb.config adb
 EOF
   fi
 
-  # Guarantee Bliss init.sh executes if present in system.img even under androidboot.hardware=android_x86_64
-  if [ -f "${SYS_ROOT}/etc/init.sh" ] && ! grep -q '/system/etc/init.sh' "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null; then
-    echo "Injecting Bliss /system/etc/init.sh hooks into vendor/etc/init/hw/init.android_x86_64.rc..."
-    cat <<'EOF' >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
+  # Sanitize vendor/etc/init/hw/init.android_x86_64.rc for native Enforcing + clean graphics sequencing
+  python3 - "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" <<'RCPY'
+import pathlib, re, sys
 
-on early-init
-    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh eglsetup
+rc = pathlib.Path(sys.argv[1])
+if not rc.exists():
+    sys.exit(0)
+lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+out = []
+for line in lines:
+    s = line.strip()
+    # Prevent read-only /system/vendor chown/chmod errors during boot
+    if re.match(r"^(chown|chmod)\s+.*\s+/system/vendor\b", s):
+        out.append("# disabled ro-fs: " + line)
+        continue
+    # Prevent early vendor.hwcomposer-* auto-start before init.portable_graphics.sh selects the right HWC
+    if re.match(r"^start\s+vendor\.hwcomposer", s):
+        out.append("# deferred to portable.hwc.svc: " + line)
+        continue
+    # Ensure mount_all targets our bridged VirtIO fstab
+    if re.match(r"^mount_all\s+/fstab\.\$\{ro\.hardware\}\s*$", s):
+        indent = line[:len(line) - len(line.lstrip())]
+        out.append(f"{indent}mount_all /vendor/etc/fstab.android_x86_64 --late\n")
+        continue
+    # Transition init.sh invocations into droidport_gfx domain (never u:r:init:s0 execute_no_trans)
+    if "/system/etc/init.sh" in s and not s.startswith("#"):
+        if "eglsetup" in s:
+            out.append("# handled by init.portable_graphics.sh: " + line)
+            continue
+        fixed = re.sub(r"exec\s+(?:u:r:init:s0|-)\s+--\s+(?:/system/bin/logwrapper\s+)?", "exec u:r:droidport_gfx:s0 -- ", line)
+        out.append(fixed)
+        continue
+    out.append(line)
+rc.write_text("".join(out), encoding="utf-8")
+print(f"Sanitized {rc} for native Enforcing & single-composer sequencing.")
+RCPY
+
+  # Guarantee Bliss init.sh executes cleanly in u:r:droidport_gfx:s0 if not already hooked, and streamline slow loop scans
+  if [ -f "${SYS_ROOT}/etc/init.sh" ]; then
+    python3 - "${SYS_ROOT}/etc/init.sh" <<'INITSHPY'
+import pathlib, re, sys
+
+p = pathlib.Path(sys.argv[1])
+txt = p.read_text(encoding="utf-8", errors="replace")
+if "droidport_fast_patch" not in txt:
+    # Guard slow loop-device / modprobe / conflicting ro.hardware.egl overwrites
+    txt = txt.replace(
+        "set_property ro.hardware.egl",
+        "[ -z \"$(getprop ro.hardware.egl)\" ] && set_property ro.hardware.egl"
+    )
+    txt = txt.replace(
+        "setprop ro.hardware.egl",
+        "[ -z \"$(getprop ro.hardware.egl)\" ] && setprop ro.hardware.egl"
+    )
+    txt = txt.replace(
+        "setprop ro.hardware.hwcomposer",
+        "[ -z \"$(getprop ro.hardware.hwcomposer)\" ] && setprop ro.hardware.hwcomposer"
+    )
+    txt = txt.replace(
+        "setprop ro.hardware.gralloc",
+        "[ -z \"$(getprop ro.hardware.gralloc)\" ] && setprop ro.hardware.gralloc"
+    )
+    txt = re.sub(r"(?m)^(\s*losetup\b.*)$", r"\1 2>/dev/null || true # droidport_fast_patch", txt)
+    txt = "# droidport_fast_patch\n" + txt
+    p.write_text(txt, encoding="utf-8")
+    print("Patched /system/etc/init.sh to preserve portable graphics properties.")
+INITSHPY
+    if ! grep -q '/system/etc/init.sh' "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null; then
+      echo "Injecting Bliss /system/etc/init.sh hooks into vendor/etc/init/hw/init.android_x86_64.rc..."
+      cat <<'EOF' >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
 
 on post-fs
-    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh
 
 on property:sys.boot_completed=1
-    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh bootcomplete
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh bootcomplete
 EOF
+    fi
   fi
 
-  # Reconcile duplicate/conflicting hwcomposer-2-1 auto-start if Bliss drmfb or 2-4 services exist
+  # Disable ALL vendor.hwcomposer-* auto-starts at build time and discover exact service names
   grep -rnE '^\s*(service |disabled|onrestart )' "${WORK_DIR}/vendor_mnt/etc/init/"*composer*.rc 2>/dev/null || true
-  COMPOSER_RC_COUNT=$(ls -1 "${WORK_DIR}/vendor_mnt/etc/init/"*composer*.rc 2>/dev/null | wc -l || echo 0)
-  if [ "${COMPOSER_RC_COUNT}" -gt 1 ]; then
-    python3 - "${WORK_DIR}/vendor_mnt/etc/init" <<'HWCPY'
+  python3 - "${WORK_DIR}/vendor_mnt/etc/init" "/tmp/hwc_service_map.env" <<'HWCPY'
 import pathlib, re, sys
 
 init_dir = pathlib.Path(sys.argv[1])
-for rc in sorted(init_dir.glob("*composer@2.*-service.rc")):
+map_out = pathlib.Path(sys.argv[2])
+discovered = []
+
+for rc in sorted(init_dir.glob("*composer*.rc")):
     lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     out = []
     in_hwc = False
@@ -393,7 +460,10 @@ for rc in sorted(init_dir.glob("*composer@2.*-service.rc")):
             if in_hwc and not has_disabled:
                 out.append("    disabled\n")
                 changed = True
-            in_hwc = bool(re.match(r"^service\s+vendor\.hwcomposer-2-[14]\b", stripped))
+            m = re.match(r"^service\s+(vendor\.hwcomposer\S+)\b", stripped)
+            in_hwc = bool(m)
+            if m:
+                discovered.append(m.group(1))
             has_disabled = False
         elif in_hwc and stripped == "disabled":
             has_disabled = True
@@ -403,9 +473,17 @@ for rc in sorted(init_dir.glob("*composer@2.*-service.rc")):
         changed = True
     if changed:
         rc.write_text("".join(out), encoding="utf-8")
-        print(f"Reconciled {rc.name}: marked default hwcomposer disabled (started dynamically by portable graphics hook)")
+        print(f"Reconciled {rc.name}: marked hwcomposer disabled (started strictly via portable.hwc.svc)")
+
+svc_drmfb = next((s for s in discovered if "drmfb" in s), "vendor.hwcomposer-2-1.drmfb")
+svc_v21 = next((s for s in discovered if "2-1" in s and "drmfb" not in s), "vendor.hwcomposer-2-1")
+svc_v24 = next((s for s in discovered if "2-4" in s), "vendor.hwcomposer-2-4")
+map_out.write_text(
+    f"HWC_SVC_DRMFB={svc_drmfb}\nHWC_SVC_V21={svc_v21}\nHWC_SVC_V24={svc_v24}\n",
+    encoding="utf-8",
+)
+print(f"Discovered HWC services: drmfb={svc_drmfb}, v21={svc_v21}, v24={svc_v24}")
 HWCPY
-  fi
   chmod 0644 "${WORK_DIR}/vendor_mnt/etc/fstab.android_x86_64" "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null || true
 
   # SELinux CIL Compatibility Reconciliation (LineageOS 20.0 API 33 system + Bliss 16.9 API 33 vendor)
@@ -438,7 +516,7 @@ HWCPY
       done
     fi
 
-    # Remove Bliss precompiled_sepolicy so Android SetupSelinux compiles cleanly with LineageOS 20 system CILs
+    # Remove Bliss precompiled_sepolicy so Android SetupSelinux compiles cleanly with our reconciled + enforcing CILs
     rm -f "${VEN_SE_DIR}/precompiled_sepolicy"*
 
     if command -v secilc >/dev/null 2>&1; then
@@ -461,14 +539,10 @@ HWCPY
       [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ] && CIL_LIST+=("${VEN_SE_DIR}/vendor_sepolicy.cil")
 
       if [ "${#CIL_LIST[@]}" -gt 0 ]; then
-        echo "Validating combined API-33 SELinux CIL policy with secilc -m (${#CIL_LIST[@]} files)..."
-        if secilc -m -M true -G -N -c 30 "${CIL_LIST[@]}" -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc.err"; then
-          echo "Verified SELinux CIL compilation succeeded cleanly!"
-          rm -f "${WORK_DIR}/test_policy"
-        else
-          echo "WARNING: secilc -m reported issues on mixed LineageOS 20 + Bliss 16.9 CIL files:"
-          head -n 25 "${WORK_DIR}/secilc.err" || true
-          echo "Running intelligent CIL conflict healer (deduplicating conflicting symbols while preserving vendor types)..."
+        echo "Step A: Reconciling base LineageOS 20 + Bliss 16.9 CIL files with secilc -m (${#CIL_LIST[@]} files)..."
+        if ! secilc -m -M true -G -N -c 30 "${CIL_LIST[@]}" -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc.err"; then
+          echo "Running CIL conflict healer on base vendor CILs..."
+          head -n 20 "${WORK_DIR}/secilc.err" || true
           python3 - "${VEN_SE_DIR}" "${WORK_DIR}/secilc.err" "${SYS_SE_DIR}" "${PLAT_VER}" "${WORK_DIR}/mnt" "${SYS_ROOT}" <<'CILPY'
 import pathlib, re, subprocess, sys
 
@@ -504,7 +578,6 @@ def comment_line(path: pathlib.Path, line_no: int) -> bool:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     idx = line_no - 1
     if 0 <= idx < len(lines) and not lines[idx].lstrip().startswith(";"):
-        # Only comment standalone single-line statements cleanly; for multi-line blocks, balance parens
         depth = lines[idx].count("(") - lines[idx].count(")")
         end = idx
         while depth > 0 and end + 1 < len(lines):
@@ -523,7 +596,7 @@ for attempt in range(150):
         capture_output=True, text=True
     )
     if proc.returncode == 0:
-        print(f"SELinux CIL healed cleanly after {attempt} iteration(s)!")
+        print(f"Base SELinux CIL healed cleanly after {attempt} iteration(s)!")
         pathlib.Path("/tmp/healed_policy.bin").unlink(missing_ok=True)
         sys.exit(0)
     err_txt = (proc.stderr or "") + "\n" + (proc.stdout or "")
@@ -531,12 +604,10 @@ for attempt in range(150):
     for m in re.finditer(r"([^\s:]+\.cil):(\d+):", err_txt):
         fpath = pathlib.Path(m.group(1))
         lno = int(m.group(2))
-        if fpath in ven_targets:
-            if comment_line(fpath, lno):
-                changed = True
-                break
+        if fpath in ven_targets and comment_line(fpath, lno):
+            changed = True
+            break
     if not changed:
-        # Handle 'Duplicate declaration' where first/second location is on vendor CIL
         dup = re.search(r"(?:Duplicate|Multiple) declaration.*?at ([^\s:]+\.cil):(\d+)", err_txt, re.S)
         if dup:
             fpath = pathlib.Path(dup.group(1))
@@ -548,10 +619,381 @@ for attempt in range(150):
         break
 CILPY
         fi
+        rm -f "${WORK_DIR}/test_policy"
+
+        echo "Step B: Injecting droidport_enforcing CIL rules & updating file_contexts/property_contexts..."
+        python3 - "${SYS_SE_DIR}" "${VEN_SE_DIR}" "${PLAT_VER}" "${WORK_DIR}/mnt" "${SYS_ROOT}" <<'ENFCILPY'
+import pathlib, re, subprocess, sys
+
+sys_se_dir = pathlib.Path(sys.argv[1])
+ven_se_dir = pathlib.Path(sys.argv[2])
+plat_ver = sys.argv[3]
+mnt_root = pathlib.Path(sys.argv[4])
+sys_root = pathlib.Path(sys.argv[5])
+
+plat_cil_path = sys_se_dir / "plat_sepolicy.cil"
+ven_cil_path = ven_se_dir / "vendor_sepolicy.cil"
+
+# Gather all active CIL files to know exact declared types & classes
+cil_files = []
+for cand in [
+    plat_cil_path,
+    sys_se_dir / "mapping" / f"{plat_ver}.cil" if plat_ver else None,
+    sys_se_dir / "mapping" / f"{plat_ver}.compat.cil" if plat_ver else None,
+    mnt_root / "system_ext/etc/selinux/system_ext_sepolicy.cil",
+    sys_root / "system_ext/etc/selinux/system_ext_sepolicy.cil",
+    mnt_root / f"system_ext/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    sys_root / f"system_ext/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    mnt_root / "product/etc/selinux/product_sepolicy.cil",
+    sys_root / "product/etc/selinux/product_sepolicy.cil",
+    mnt_root / f"product/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    sys_root / f"product/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    ven_se_dir / "plat_pub_versioned.cil",
+    ven_cil_path,
+]:
+    if cand and cand.is_file() and str(cand) not in cil_files:
+        cil_files.append(str(cand))
+
+plat_txt = plat_cil_path.read_text(encoding="utf-8", errors="replace") if plat_cil_path.is_file() else ""
+all_cil_txt = "\n".join(pathlib.Path(p).read_text(encoding="utf-8", errors="replace") for p in cil_files)
+
+declared_types = set(re.findall(r"\(\s*(?:type|typeattribute|typealias)\s+([^\s()]+)", all_cil_txt))
+plat_types = set(re.findall(r"\(\s*(?:type|typeattribute|typealias)\s+([^\s()]+)", plat_txt))
+declared_classes = set(re.findall(r"\(\s*class\s+([^\s()]+)", all_cil_txt))
+
+def pick_type(*candidates):
+    for c in candidates:
+        if c in declared_types:
+            return c
+    return None
+
+# Ensure plat_sepolicy.cil does not already have old marker
+if "; BEGIN DROIDPORT ENFORCING" in plat_txt:
+    plat_txt = plat_txt.split("; BEGIN DROIDPORT ENFORCING")[0].rstrip() + "\n"
+
+plat_rules = ["; BEGIN DROIDPORT ENFORCING COMPAT"]
+
+def add_plat_allow(src, tgt, cls, perms):
+    if src in plat_types and (tgt in plat_types or tgt == "self") and cls in declared_classes:
+        plat_rules.append(f"(allow {src} {tgt} ({cls} ({perms})))")
+
+# Dedicated droidport_gfx domain for init.portable_graphics.sh & init.sh (avoids init execute_no_trans!)
+if "droidport_gfx" not in declared_types:
+    plat_rules.extend([
+        "(type droidport_gfx)",
+        "(roletype object_r droidport_gfx)",
+        "(typeattributeset domain (droidport_gfx))",
+        "(type droidport_gfx_exec)",
+        "(roletype object_r droidport_gfx_exec)",
+        "(typeattributeset file_type (droidport_gfx_exec))",
+        "(typeattributeset exec_type (droidport_gfx_exec))",
+        "(typeattributeset system_file_type (droidport_gfx_exec))",
+        "(typetransition init droidport_gfx_exec process droidport_gfx)",
+        "(allow init droidport_gfx_exec (file (read open getattr execute map)))",
+        "(allow init droidport_gfx (process (transition siginh rlimitinh noatsecure)))",
+        "(allow droidport_gfx droidport_gfx_exec (file (read open getattr execute map entrypoint execute_no_trans)))",
+    ])
+    plat_types.add("droidport_gfx")
+    plat_types.add("droidport_gfx_exec")
+    declared_types.add("droidport_gfx")
+    declared_types.add("droidport_gfx_exec")
+
+# Grant droidport_gfx permissions needed for graphics/hardware detection, /data/adb/ksud hooks & setprop
+add_plat_allow("droidport_gfx", "shell_exec", "file", "read open getattr execute execute_no_trans map entrypoint")
+add_plat_allow("droidport_gfx", "toolbox_exec", "file", "read open getattr execute execute_no_trans map entrypoint")
+add_plat_allow("droidport_gfx", "vendor_shell_exec", "file", "read open getattr execute execute_no_trans map entrypoint")
+for cls, perms in [
+    ("file", "read write open getattr setattr create unlink execute execute_no_trans map"),
+    ("dir", "read write open getattr setattr search add_name remove_name create"),
+    ("lnk_file", "read getattr"),
+]:
+    for t in [
+        "shell_exec", "toolbox_exec", "system_file", "vendor_file", "vendor_configs_file",
+        "vendor_shell_exec", "vendor_toolbox_exec", "rootfs", "sysfs", "proc_cmdline",
+        "proc", "device", "dri_device", "gpu_device", "graphics_device", "kmsg_device",
+        "ion_device", "dmabuf_system_heap_device", "vendor_default_prop", "default_prop",
+        "system_prop", "exported_system_prop", "config_prop", "devpts", "null_device",
+        "adb_data_file", "system_data_file", "system_data_root_file",
+    ]:
+        if t in plat_types and cls in declared_classes:
+            plat_rules.append(f"(allow droidport_gfx {t} ({cls} ({perms})))")
+
+for dev_t in ["dri_device", "gpu_device", "graphics_device", "ion_device", "dmabuf_system_heap_device", "kmsg_device", "device", "null_device", "zero_device"]:
+    add_plat_allow("droidport_gfx", dev_t, "chr_file", "read write open getattr setattr ioctl map")
+
+add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin")
+add_plat_allow("droidport_gfx", "property_socket", "sock_file", "write")
+add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
+add_plat_allow("droidport_gfx", "init", "fd", "use")
+add_plat_allow("droidport_gfx", "devpts", "chr_file", "read write getattr ioctl")
+add_plat_allow("droidport_gfx", "kernel", "fd", "use")
+for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop"]:
+    add_plat_allow("droidport_gfx", prop_t, "property_service", "set")
+    add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
+
+# SurfaceFlinger & BootAnimation DRM/GPU/tty0/sysfs/prop permissions
+add_plat_allow("surfaceflinger", "gpu_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("surfaceflinger", "tty_device", "chr_file", "read write open getattr ioctl")
+add_plat_allow("surfaceflinger", "graphics_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("surfaceflinger", "device", "chr_file", "read write open getattr ioctl")
+add_plat_allow("surfaceflinger", "sysfs", "dir", "read open getattr search")
+add_plat_allow("surfaceflinger", "sysfs", "file", "read open getattr")
+add_plat_allow("surfaceflinger", "sysfs", "lnk_file", "read getattr")
+add_plat_allow("surfaceflinger", "vendor_default_prop", "file", "read open getattr map")
+
+add_plat_allow("bootanim", "gpu_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("bootanim", "sysfs", "dir", "read open getattr search")
+add_plat_allow("bootanim", "sysfs", "file", "read open getattr")
+add_plat_allow("bootanim", "sysfs", "lnk_file", "read getattr")
+add_plat_allow("bootanim", "vendor_default_prop", "file", "read open getattr map")
+
+# fsck / init / vold / vendor_init / system_suspend / kernel / adbd / audioserver / toolbox
+add_plat_allow("fsck", "vd_device", "blk_file", "read write open getattr ioctl")
+add_plat_allow("fsck", "userdata_block_device", "blk_file", "read write open getattr ioctl")
+add_plat_allow("init", "unlabeled", "dir", "read open getattr search mounton setattr")
+add_plat_allow("init", "unlabeled", "file", "read open getattr")
+add_plat_allow("init", "hwservicemanager", "binder", "call transfer")
+add_plat_allow("init", "self", "vsock_socket", "create bind listen accept read write")
+add_plat_allow("init", "watchdog_metadata_file", "file", "rename unlink create write read open getattr")
+add_plat_allow("init", "adb_data_file", "file", "rename unlink create write read open getattr")
+add_plat_allow("init", "device", "chr_file", "read write open getattr ioctl")
+add_plat_allow("system_suspend", "input_device", "chr_file", "read open getattr ioctl")
+add_plat_allow("audioserver", "vendor_default_prop", "file", "read open getattr map")
+add_plat_allow("adbd", "kernel", "system", "module_request")
+add_plat_allow("kernel", "device", "dir", "read write open getattr search add_name remove_name")
+add_plat_allow("kernel", "device", "chr_file", "read write open getattr create setattr unlink")
+add_plat_allow("kernel", "toolbox_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("toolbox", "loop_device", "blk_file", "read open getattr ioctl")
+add_plat_allow("toolbox", "sysfs", "dir", "read open getattr search")
+add_plat_allow("toolbox", "sysfs", "file", "read open getattr")
+add_plat_allow("toolbox", "proc_cmdline", "file", "read open getattr")
+add_plat_allow("toolbox", "kmsg_device", "chr_file", "read write open getattr")
+add_plat_allow("toolbox", "kernel", "system", "syslog_read")
+add_plat_allow("toolbox", "adb_data_file", "file", "read write open getattr ioctl")
+add_plat_allow("toolbox", "logcat_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("toolbox", "toolbox_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("toolbox", "logdr_socket", "sock_file", "write")
+add_plat_allow("toolbox", "logd", "unix_stream_socket", "connectto")
+add_plat_allow("toolbox", "property_socket", "sock_file", "write")
+add_plat_allow("toolbox", "init", "unix_stream_socket", "connectto")
+add_plat_allow("toolbox", "unlabeled", "dir", "read open getattr search")
+
+plat_rules.append("; END DROIDPORT ENFORCING COMPAT\n")
+plat_cil_path.write_text(plat_txt + "\n" + "\n".join(plat_rules), encoding="utf-8")
+
+# Vendor CIL rules (use versioned names if present in plat_pub_versioned/mapping, else unversioned)
+if ven_cil_path.is_file():
+    ven_txt = ven_cil_path.read_text(encoding="utf-8", errors="replace")
+    if "; BEGIN DROIDPORT VENDOR ENFORCING" in ven_txt:
+        ven_txt = ven_txt.split("; BEGIN DROIDPORT VENDOR ENFORCING")[0].rstrip() + "\n"
+    ven_rules = ["; BEGIN DROIDPORT VENDOR ENFORCING COMPAT"]
+    # Identify types visible in vendor CIL scope
+    def vtype(*cands):
+        for c in cands:
+            if c in declared_types:
+                return c
+        return None
+
+    def add_ven_allow(src_cands, tgt_cands, cls, perms):
+        s = vtype(*src_cands) if isinstance(src_cands, tuple) else (src_cands if src_cands in declared_types else None)
+        t = "self" if tgt_cands == "self" else (vtype(*tgt_cands) if isinstance(tgt_cands, tuple) else (tgt_cands if tgt_cands in declared_types else None))
+        if s and t and cls in declared_classes:
+            ven_rules.append(f"(allow {s} {t} ({cls} ({perms})))")
+
+    add_ven_allow(("hal_graphics_composer_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_composer_default",), "self", "netlink_kobject_uevent_socket", "create bind read write getattr getopt setopt")
+    add_ven_allow(("hal_graphics_composer_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_composer_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_composer_default",), ("gpu_device", f"gpu_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_composer_default",), ("graphics_device", f"graphics_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+
+    add_ven_allow(("hal_gnss_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_light_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search")
+    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "file", "read open getattr")
+    add_ven_allow(("hal_audio_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("vendor_init",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("vendor_init",), ("config_prop", f"config_prop_{plat_ver.replace('.', '_')}"), "property_service", "set")
+    add_ven_allow(("vendor_init",), ("dhcp_data_file", f"dhcp_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
+    add_ven_allow(("vendor_init",), ("system_data_file", f"system_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
+    add_ven_allow(("vendor_init",), ("wifi_data_file", f"wifi_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
+
+    ven_rules.append("; END DROIDPORT VENDOR ENFORCING COMPAT\n")
+    ven_cil_path.write_text(ven_txt + "\n" + "\n".join(ven_rules), encoding="utf-8")
+
+# Update plat_file_contexts & vendor_file_contexts & plat_property_contexts
+plat_fc = sys_se_dir / "plat_file_contexts"
+if plat_fc.is_file():
+    pfc_txt = plat_fc.read_text(encoding="utf-8", errors="replace")
+    extra_pfc = [
+        "/system/etc/init\\.portable_graphics\\.sh\tu:object_r:droidport_gfx_exec:s0",
+        "/system/etc/init\\.sh\tu:object_r:droidport_gfx_exec:s0",
+        "/sbin/droidport_init_wrapper\tu:object_r:init_exec:s0",
+        "/dev/ttyS[0-9]*\tu:object_r:console_device:s0",
+        "/dev/tty0\tu:object_r:tty_device:s0",
+    ]
+    for line in extra_pfc:
+        if line.split("\t")[0] not in pfc_txt:
+            pfc_txt = pfc_txt.rstrip() + "\n" + line + "\n"
+    plat_fc.write_text(pfc_txt, encoding="utf-8")
+
+plat_pc = sys_se_dir / "plat_property_contexts"
+if plat_pc.is_file():
+    ppc_txt = plat_pc.read_text(encoding="utf-8", errors="replace")
+    for pname in ["portable.hwc.svc", "mesa.libgl.always.software"]:
+        if pname not in ppc_txt:
+            ppc_txt = ppc_txt.rstrip() + f"\n{pname} u:object_r:system_prop:s0\n"
+    plat_pc.write_text(ppc_txt, encoding="utf-8")
+
+ven_fc = ven_se_dir / "vendor_file_contexts"
+if ven_fc.is_file():
+    vfc_txt = ven_fc.read_text(encoding="utf-8", errors="replace")
+    bt_exec = pick_type("hal_bluetooth_default_exec", "hal_bluetooth_exec") or "hal_bluetooth_default_exec"
+    gk_exec = pick_type("hal_gatekeeper_default_exec", "hal_gatekeeper_exec") or "hal_gatekeeper_default_exec"
+    c2_exec = pick_type("mediacodec_exec", "hal_codec2_default_exec") or "mediacodec_exec"
+    th_exec = pick_type("hal_thermal_default_exec", "thermalserviced_exec") or "hal_thermal_default_exec"
+    hwc_exec = pick_type("hal_graphics_composer_default_exec", "hal_graphics_composer_exec") or "hal_graphics_composer_default_exec"
+    extra_vfc = [
+        ("/vendor/etc/fstab\\.android_x86_64", "u:object_r:vendor_configs_file:s0"),
+        ("/vendor/etc/ueventd\\.rc", "u:object_r:vendor_configs_file:s0"),
+        ("/vendor/etc/init(/.*)?", "u:object_r:vendor_configs_file:s0"),
+        ("/vendor/bin/hw/android\\.hardware\\.graphics\\.composer@2\\.1-drmfb-service", f"u:object_r:{hwc_exec}:s0"),
+        ("/vendor/bin/hw/android\\.hardware\\.bluetooth@1\\.1-service\\.vbt", f"u:object_r:{bt_exec}:s0"),
+        ("/vendor/bin/hw/android\\.hardware\\.gatekeeper@1\\.0-service\\.software", f"u:object_r:{gk_exec}:s0"),
+        ("/vendor/bin/hw/android\\.hardware\\.media\\.c2@1\\.2-ffmpeg-service", f"u:object_r:{c2_exec}:s0"),
+        ("/vendor/bin/hw/android\\.hardware\\.thermal@2\\.0-service\\.intel", f"u:object_r:{th_exec}:s0"),
+    ]
+    for pat, ctx in extra_vfc:
+        if pat not in vfc_txt:
+            vfc_txt = vfc_txt.rstrip() + f"\n{pat}\t{ctx}\n"
+    ven_fc.write_text(vfc_txt, encoding="utf-8")
+
+print("Injected DroidPort Enforcing CILs and file/property contexts.")
+ENFCILPY
+
+        echo "Step C: Strict final secilc verification on combined Enforcing CIL policy..."
+        if ! secilc -m -M true -G -N -c 30 "${CIL_LIST[@]}" -o "${WORK_DIR}/final_policy" -f /dev/null 2>"${WORK_DIR}/secilc_final.err"; then
+          echo "ERROR: Final combined SELinux CIL compilation failed!" >&2
+          cat "${WORK_DIR}/secilc_final.err" >&2 || true
+          exit 1
+        fi
+        rm -f "${WORK_DIR}/final_policy" "${WORK_DIR}/secilc_final.err" "${WORK_DIR}/secilc.err"
+        echo "Verified final SELinux CIL policy compiles cleanly with 0 errors!"
       fi
     fi
   fi
 fi
+
+# Apply build-time security.selinux extended attributes across vendor, system, and record /data root context
+echo "Applying deterministic security.selinux ext4 xattrs from merged file_contexts..."
+python3 - "${WORK_DIR}/mnt" "${SYS_ROOT}" "${WORK_DIR}/vendor_mnt" "${HAS_VENDOR_RW}" <<'XATTRPY'
+import os, pathlib, re, sys
+
+mnt_root = pathlib.Path(sys.argv[1])
+sys_root = pathlib.Path(sys.argv[2])
+ven_root = pathlib.Path(sys.argv[3])
+has_ven = sys.argv[4] == "1"
+
+fc_files = []
+for cand in [
+    sys_root / "etc/selinux/plat_file_contexts",
+    mnt_root / "system_ext/etc/selinux/system_ext_file_contexts",
+    sys_root / "system_ext/etc/selinux/system_ext_file_contexts",
+    mnt_root / "product/etc/selinux/product_file_contexts",
+    sys_root / "product/etc/selinux/product_file_contexts",
+    ven_root / "etc/selinux/vendor_file_contexts" if has_ven else None,
+]:
+    if cand and cand.is_file() and cand not in fc_files:
+        fc_files.append(cand)
+
+rules = []
+for fcf in fc_files:
+    for raw in fcf.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        pat_raw = parts[0]
+        ftype = None
+        if len(parts) >= 3 and parts[1].startswith("--") or (len(parts) >= 3 and parts[1] in ("-b", "-c", "-d", "-p", "-l", "-s", "--")):
+            ftype = parts[1]
+            ctx = parts[2]
+        else:
+            ctx = parts[-1]
+        if not ctx.startswith("u:object_r:") or ctx == "<<none>>":
+            continue
+        try:
+            rx = re.compile(f"^(?:{pat_raw})$")
+        except re.error:
+            continue
+        # Android file_contexts priority: regex literal prefix length + exactness, last wins on tie
+        has_meta = bool(re.search(r"[.*+?\[\]()|^$\\]", pat_raw))
+        rules.append((0 if has_meta else 1, len(pat_raw), len(rules), ftype, rx, ctx))
+
+def match_ctx(android_path: str, is_dir: bool, is_link: bool, default_ctx: str) -> str:
+    best = None
+    for exact, plen, order, ftype, rx, ctx in rules:
+        if ftype == "-d" and not is_dir:
+            continue
+        if ftype == "-l" and not is_link:
+            continue
+        if ftype == "--" and (is_dir or is_link):
+            continue
+        if rx.match(android_path):
+            cand = (exact, plen, order)
+            if best is None or cand > best[0]:
+                best = (cand, ctx)
+    return best[1] if best else default_ctx
+
+def label_tree(fs_root: pathlib.Path, android_prefix: str, default_ctx: str, only_missing: bool) -> tuple[int, int]:
+    labeled = 0
+    errors = 0
+    # Label root directory itself
+    try:
+        root_apath = android_prefix or "/"
+        root_ctx = match_ctx(root_apath, True, False, default_ctx)
+        os.setxattr(str(fs_root), b"security.selinux", root_ctx.encode("utf-8") + b"\x00", follow_symlinks=False)
+        labeled += 1
+    except OSError:
+        errors += 1
+
+    for dirpath, dirnames, filenames in os.walk(fs_root, followlinks=False):
+        dp = pathlib.Path(dirpath)
+        rel_dir = dp.relative_to(fs_root).as_posix()
+        for name in list(dirnames) + list(filenames):
+            full = dp / name
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            apath = f"{android_prefix}/{rel}" if android_prefix else f"/{rel}"
+            is_link = full.is_symlink()
+            is_dir = False if is_link else full.is_dir()
+            if only_missing:
+                try:
+                    cur = os.getxattr(str(full), b"security.selinux", follow_symlinks=False)
+                    if cur and b"unlabeled" not in cur:
+                        continue
+                except OSError:
+                    pass
+            ctx = match_ctx(apath, is_dir, is_link, default_ctx)
+            try:
+                os.setxattr(str(full), b"security.selinux", ctx.encode("utf-8") + b"\x00", follow_symlinks=False)
+                labeled += 1
+            except OSError:
+                errors += 1
+    return labeled, errors
+
+if has_ven and ven_root.is_dir():
+    v_cnt, v_err = label_tree(ven_root, "/vendor", "u:object_r:vendor_file:s0", only_missing=False)
+    print(f"Labeled vendor.img tree with security.selinux xattrs: {v_cnt} entries (errors={v_err})")
+
+s_cnt, s_err = label_tree(mnt_root, "", "u:object_r:system_file:s0", only_missing=True)
+print(f"Filled missing security.selinux xattrs in system.img: {s_cnt} entries (errors={s_err})")
+
+data_ctx = match_ctx("/data", True, False, "u:object_r:system_data_root_file:s0")
+pathlib.Path("/tmp/data_root_secontext").write_text(data_ctx, encoding="utf-8")
+print(f"Resolved /data root SELinux context -> {data_ctx}")
+XATTRPY
 
 # Compile pure -nostdlib static x86_64 PID-1 /init diagnostic wrapper (zero glibc/AVX/IFUNC overhead)
 echo "Compiling pure -nostdlib static PID-1 /init wrapper (/sbin/droidport_init_wrapper)..."
@@ -864,6 +1306,18 @@ int c_main(int argc, char **argv, char **envp) {
     if (g_tty > 2) sc1(SYS_close, g_tty);
     if (g_kmsg >= 0) sc1(SYS_close, g_kmsg);
 
+    /* Guarantee PID-1 Android /init and all children hold /dev/null on fds 0/1/2 (no /dev/ttyS0 SELinux leak) */
+    if (sc2(SYS_access, (long)"/dev/null", F_OK) != 0) {
+        sc3(SYS_mknod, (long)"/dev/null", S_IFCHR | 0666, (1L << 8) | 3L);
+    }
+    int null_fd = (int)sc3(SYS_open, (long)"/dev/null", O_RDWR, 0);
+    if (null_fd >= 0) {
+        sc2(SYS_dup2, null_fd, 0);
+        sc2(SYS_dup2, null_fd, 1);
+        sc2(SYS_dup2, null_fd, 2);
+        if (null_fd > 2) sc1(SYS_close, null_fd);
+    }
+
     char *init_argv[16];
     init_argv[0] = (char *)init_exec;
     int copy_cnt = (argc > 1) ? ((argc < 15) ? argc : 15) : 1;
@@ -982,7 +1436,7 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
     done
   fi
 
-  # Prefer Bliss drmfb service in 2D/SW mode if installed
+  # Prefer Bliss drmfb service in 2D/SW mode if installed, otherwise single active composer
   if [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; then
     setprop debug.sf.hwc_service_name drmfb
     setprop portable.hwc.svc drmfb
@@ -1022,41 +1476,66 @@ _glog "final hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware
 EOF
   chmod 0755 "${SYS_ROOT}/etc/init.portable_graphics.sh"
 
-  cat <<'EOF' > "${INIT_DIR}/init.portable_selinux.rc"
+  HWC_SVC_DRMFB="vendor.hwcomposer-2-1.drmfb"
+  HWC_SVC_V21="vendor.hwcomposer-2-1"
+  HWC_SVC_V24="vendor.hwcomposer-2-4"
+  if [ -f "/tmp/hwc_service_map.env" ]; then
+    # shellcheck disable=SC1091
+    . /tmp/hwc_service_map.env
+  fi
+
+  cat <<EOF > "${INIT_DIR}/init.portable_selinux.rc"
+on early-fs
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
+
 on post-fs
     chmod 0666 /dev/dri/card0
     chmod 0666 /dev/dri/renderD128
     chmod 0666 /dev/ion
     chmod 0666 /dev/dma_heap/system
-    exec u:r:init:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
 
 on property:portable.hwc.svc=drmfb
-    stop vendor.hwcomposer-2-1
-    stop vendor.hwcomposer-2-4
-    start vendor.hwcomposer-2-1.drmfb
+    stop ${HWC_SVC_V21}
+    stop ${HWC_SVC_V24}
+    start ${HWC_SVC_DRMFB}
 
 on property:portable.hwc.svc=v21
-    stop vendor.hwcomposer-2-1.drmfb
-    stop vendor.hwcomposer-2-4
-    start vendor.hwcomposer-2-1
+    stop ${HWC_SVC_DRMFB}
+    stop ${HWC_SVC_V24}
+    start ${HWC_SVC_V21}
 
 on property:portable.hwc.svc=v24
-    stop vendor.hwcomposer-2-1.drmfb
-    stop vendor.hwcomposer-2-1
-    start vendor.hwcomposer-2-4
+    stop ${HWC_SVC_DRMFB}
+    stop ${HWC_SVC_V21}
+    start ${HWC_SVC_V24}
 
 on post-fs-data
     restorecon_recursive /data/adb
     restorecon_recursive /data/local/tmp
-    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; /data/adb/ksud sepolicy patch 'allow hal_graphics_composer_default * * *' 'allow hal_graphics_allocator_default * * *' 'allow surfaceflinger * * *' 'allow su * * *' 2>/dev/null || true; fi"
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; fi"
 
 on boot
-    setprop ro.hwui.use_vulkan false
+    setprop debug.hwui.renderer opengl
 
 on property:sys.boot_completed=1
-    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
+    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
 EOF
   chmod 0644 "${INIT_DIR}/init.portable_selinux.rc"
+  rm -f "/tmp/hwc_service_map.env"
+
+  # Ensure xattrs on newly created init.portable_graphics.sh & init.portable_selinux.rc match updated plat_file_contexts
+  python3 - "${SYS_ROOT}/etc/init.portable_graphics.sh" "${INIT_DIR}/init.portable_selinux.rc" "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" <<'X2PY'
+import os, sys
+pairs = [
+    (sys.argv[1], "u:object_r:droidport_gfx_exec:s0"),
+    (sys.argv[2], "u:object_r:system_file:s0"),
+    (sys.argv[3], "u:object_r:init_exec:s0"),
+]
+for p, ctx in pairs:
+    if os.path.exists(p):
+        os.setxattr(p, b"security.selinux", ctx.encode() + b"\x00", follow_symlinks=False)
+X2PY
 fi
 
 # Unmount & re-compress vendor.img if modified
@@ -1198,6 +1677,13 @@ if [ -x /sbin/ksud ] && [ -d "${TARGET_ROOT}/data" ] && grep -q " ${TARGET_ROOT}
   cp -f /sbin/ksud "${TARGET_ROOT}/data/adb/ksud" 2>/dev/null || true
   chmod 0755 "${TARGET_ROOT}/data/adb/ksud" 2>/dev/null || true
   _dp_log "KernelSU Next staged /sbin/ksud -> ${TARGET_ROOT}/data/adb/ksud (OverlayFS Magic Mount ready)"
+fi
+
+# Unmount /data cleanly before switch_root so Android init mount_all/e2fsck owns /dev/block/vdc without EBUSY (0x800)
+if grep -q " ${TARGET_ROOT}/data " /proc/mounts 2>/dev/null; then
+  sync
+  umount "${TARGET_ROOT}/data" 2>/dev/null || umount -l "${TARGET_ROOT}/data" 2>/dev/null || true
+  _dp_log "Unmounted ${TARGET_ROOT}/data cleanly for Android init mount_all ownership"
 fi
 
 _dp_log "DRM/FB sysfs check: dri=$(ls -1 /dev/dri 2>/dev/null | tr '\n' ' ' || echo none) fb=$(ls -1 /dev/fb* 2>/dev/null | tr '\n' ' ' || echo none)"

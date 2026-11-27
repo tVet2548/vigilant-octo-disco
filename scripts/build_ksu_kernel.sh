@@ -64,7 +64,7 @@ elif [ -f "${WORK_DIR}/iso_mnt/vendor.efs" ]; then
       mkfs.ext4 -F -L vendor "${RAW_VENDOR}" >/dev/null
       mkdir -p "${WORK_DIR}/vendor_ext_tmp"
       mount -o loop "${RAW_VENDOR}" "${WORK_DIR}/vendor_ext_tmp"
-      cp -a "${WORK_DIR}/vefs_mnt/." "${WORK_DIR}/vendor_ext_tmp/"
+      cp -a --preserve=all "${WORK_DIR}/vefs_mnt/." "${WORK_DIR}/vendor_ext_tmp/" 2>/dev/null || cp -a "${WORK_DIR}/vefs_mnt/." "${WORK_DIR}/vendor_ext_tmp/"
       sync
       umount "${WORK_DIR}/vendor_ext_tmp"
     fi
@@ -476,6 +476,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       --enable CONFIG_VIRTIO_CONSOLE \
       --enable CONFIG_VIRTIO_INPUT \
       --enable CONFIG_VIRTIO_BALLOON \
+      --enable CONFIG_HW_RANDOM \
       --enable CONFIG_HW_RANDOM_VIRTIO \
       --enable CONFIG_PRINTK \
       --enable CONFIG_PRINTK_TIME \
@@ -624,6 +625,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     grep -q '^CONFIG_DEVTMPFS_MOUNT=y' .config
     grep -q '^CONFIG_TMPFS=y' .config
     grep -q '^CONFIG_ANDROID_BINDER_IPC=y' .config
+    grep -q '^CONFIG_HW_RANDOM_VIRTIO=y' .config
     grep -q '^CONFIG_GENERIC_CPU=y' .config
   }
 

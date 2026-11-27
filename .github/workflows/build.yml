@@ -157,6 +157,18 @@ jobs:
           rm -f "${RAW_DATA}" "${BUNDLE_DIR}/images/data.img" "${BUNDLE_DIR}/images/data_clean.qcow2"
           truncate -s 16G "${RAW_DATA}"
           mkfs.ext4 -F -L data "${RAW_DATA}"
+          DATA_MNT="/tmp/data_clean_mnt"
+          DATA_CTX=$(cat /tmp/data_root_secontext 2>/dev/null || echo "u:object_r:system_data_root_file:s0")
+          rm -rf "${DATA_MNT}" && mkdir -p "${DATA_MNT}"
+          sudo mount -o loop "${RAW_DATA}" "${DATA_MNT}"
+          sudo python3 - "${DATA_MNT}" "${DATA_CTX}" <<'DATACTX'
+import os, sys
+os.setxattr(sys.argv[1], b"security.selinux", sys.argv[2].encode("utf-8") + b"\x00", follow_symlinks=False)
+DATACTX
+          sudo sync
+          sudo umount "${DATA_MNT}"
+          rmdir "${DATA_MNT}"
+          rm -f /tmp/data_root_secontext
           e2fsck -f -y "${RAW_DATA}" || true
           qemu-img convert -c -O qcow2 "${RAW_DATA}" "${BUNDLE_DIR}/images/data_clean.qcow2"
           cp -f "${BUNDLE_DIR}/images/data_clean.qcow2" "${BUNDLE_DIR}/images/data.img"
@@ -173,7 +185,7 @@ jobs:
             local LOGF="/tmp/ci_smoke_${KNAME}.log"
             local DBGF="/tmp/ci_qemu_debug_${KNAME}.log"
             rm -f "${LOGF}" "${DBGF}"
-            echo "=== Smoke testing ${KNAME} + ${INAME} under QEMU TCG (-cpu IvyBridge, virtio-vga SW) ==="
+            echo "=== Smoke testing ${KNAME} + ${INAME} under QEMU TCG (-cpu IvyBridge, SELinux Enforcing, virtio-vga SW) ==="
             qemu-system-x86_64 \
               -name "CI-Smoke-${KNAME}" \
               -no-reboot -snapshot \
@@ -182,19 +194,20 @@ jobs:
               -m 2048 \
               -accel tcg,thread=multi \
               -cpu IvyBridge,+ssse3,+sse4.1,+sse4.2,+popcnt \
+              -device virtio-rng-pci \
               -vga none -device virtio-vga,xres=1280,yres=720 -display none \
               -drive file="${BUNDLE_DIR}/images/system.img",if=virtio,format=qcow2,readonly=on \
               -drive file="${BUNDLE_DIR}/images/vendor.img",if=virtio,format=qcow2,readonly=on \
               -drive file="${BUNDLE_DIR}/images/data.img",if=virtio,format=qcow2 \
               -kernel "${BUNDLE_DIR}/images/${KNAME}" \
               -initrd "${BUNDLE_DIR}/images/${INAME}" \
-              -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb video=1280x720 DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep console=ttyS0,115200 SERIAL=ttyS0 loglevel=7" \
+              -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=enforcing HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep console=ttyS0,115200 SERIAL=ttyS0 loglevel=7" \
               -serial "file:${LOGF}" \
               -d guest_errors,cpu_reset -D "${DBGF}" >/tmp/ci_qemu_out_${KNAME}.log 2>&1 &
             local QPID=$!
             local OK=0
             local EARLY_ABORT=0
-            local FAIL_RE='\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing|InitFatalReboot|Init encountered errors|Attempted to kill init|reboot: Restarting system'
+            local FAIL_RE='\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing|InitFatalReboot|Init encountered errors|Attempted to kill init|reboot: Restarting system|has incorrect label or no domain transition|vrend_decode_ctx_submit_cmd|Illegal command buffer|User-defined mode not supported'
             local GFX_FAIL_RE="Service 'vendor\\.hwcomposer[^']*' exited with status [1-9]|Service 'surfaceflinger' exited with status [1-9]|surfaceflinger.*killed by signal 9"
             local STAGE2_RE='init second stage started'
             local GFX_READY_RE='\[PORTABLE-GFX\]|starting service '\''(vendor\.hwcomposer|surfaceflinger)'
@@ -229,22 +242,24 @@ jobs:
             done
             kill "${QPID}" 2>/dev/null || true
             wait "${QPID}" 2>/dev/null || true
+            echo "--- SELinux Enforcing & AVC summary from ${LOGF} ---"
+            grep -iE 'selinux|enforcing|avc: denied|has incorrect label|droidport_gfx' "${LOGF}" 2>/dev/null | tail -n 35 || true
             echo "--- Graphics/DRM/HWC summary from ${LOGF} ---"
-            grep -iE '\[PORTABLE-GFX\]|drm|fb0|virtio_gpu|bochs|hwcomposer|surfaceflinger' "${LOGF}" 2>/dev/null | tail -n 35 || true
+            grep -iE '\[PORTABLE-GFX\]|drm|fb0|virtio_gpu|bochs|hwcomposer|surfaceflinger|bootanim' "${LOGF}" 2>/dev/null | tail -n 35 || true
             echo "--- Tail of ${LOGF} ---"
             tail -n 60 "${LOGF}" 2>/dev/null || true
             if [ "${EARLY_ABORT}" -eq 1 ]; then
               OK=0
             fi
             if [ "${OK}" -ne 1 ]; then
-              echo "ERROR: ${KNAME} + ${INAME} failed CI QEMU IvyBridge boot / Graphics HAL smoke test!" >&2
+              echo "ERROR: ${KNAME} + ${INAME} failed CI QEMU IvyBridge Enforcing / Graphics HAL smoke test!" >&2
               cat "/tmp/ci_qemu_out_${KNAME}.log" >&2 || true
               echo "--- QEMU cpu_reset/guest_errors (${DBGF}) ---" >&2
               tail -n 60 "${DBGF}" >&2 || true
               SMOKE_FAIL=1
               return 0
             fi
-            echo "PASSED: ${KNAME} + ${INAME} booted cleanly into Android init & stable Graphics HAL!"
+            echo "PASSED: ${KNAME} + ${INAME} booted cleanly under SELinux Enforcing & stable Graphics HAL!"
           }
           run_boot_smoke "kernel_ksunext" "initrd_ksunext.img"
           run_boot_smoke "kernel_stock" "initrd_stock.img"

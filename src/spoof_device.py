@@ -364,31 +364,41 @@ def ensure_selinux_boot_health(
     target_mode: str,
     log_fn: Callable[[str], None] = print,
 ) -> bool:
-    """Run restorecon -R /data, apply KernelSU Next sepolicy patches, and transition SELinux post-boot."""
+    """Verify native boot-time SELinux state, run targeted restorecon, and sync mode if needed."""
     if not ensure_adb_connected(adb_exe, log_fn):
         return False
 
     desired = "enforcing" if target_mode.lower() == "enforcing" else "permissive"
     env_info = detect_kernel_mode(adb_exe, log_fn)
+    cur = (run_adb(adb_exe, ["shell", "getenforce"], timeout=10).stdout or "").strip().lower()
+
+    if cur == desired:
+        log_fn(f"[SELINUX] Native boot-time {desired.title()} active (getenforce={cur}). Verifying /data/adb & /data/local/tmp labels...")
+        if env_info["mode"] == "ksunext":
+            run_adb(
+                adb_exe,
+                ["shell", "su -c 'restorecon -R /data/adb /data/local/tmp 2>/dev/null || true'"],
+                timeout=25,
+            )
+        else:
+            run_adb(
+                adb_exe,
+                ["shell", "restorecon -R /data/local/tmp 2>/dev/null || true"],
+                timeout=15,
+            )
+        return True
 
     if env_info["mode"] == "ksunext":
-        log_fn(f"[SELINUX] Stage-1 booted Permissive -> running restorecon & KSU Next sepolicy patches (target: {desired})...")
+        log_fn(f"[SELINUX] Booted {cur or 'unknown'} -> syncing /data labels & setting mode={desired}...")
         sepolicy_cmds = [
             "restorecon -R /data/adb /data/local /data/data /data/system /data/misc 2>/dev/null || restorecon -R /data",
-            "if [ -x /data/adb/ksud ]; then "
-            "/data/adb/ksud sepolicy patch "
-            "'allow hal_graphics_composer_default * * *' "
-            "'allow surfaceflinger * * *' "
-            "'allow untrusted_app hal_graphics_allocator_default * *' "
-            "'allow su * * *' 2>/dev/null || true; "
-            "fi",
             "setenforce 1" if desired == "enforcing" else "setenforce 0",
         ]
         res = run_adb(adb_exe, ["shell", f"su -c '{' && '.join(sepolicy_cmds)}'"], timeout=45)
-        if res.returncode != 0:
-            log_fn(f"[SELINUX] Note during restorecon/sepolicy: {res.stderr.strip()}")
+        if res.returncode != 0 and res.stderr.strip():
+            log_fn(f"[SELINUX] Note during restorecon/setenforce: {res.stderr.strip()}")
     else:
-        log_fn(f"[SELINUX] Stock kernel active (stage-1 Permissive -> target: {desired})...")
+        log_fn(f"[SELINUX] Stock kernel active ({cur or 'unknown'} -> target: {desired})...")
         switched_adb_root = False
         if desired == "enforcing":
             root_res = run_adb(adb_exe, ["root"], timeout=10)
@@ -422,8 +432,8 @@ def ensure_selinux_boot_health(
             _t.sleep(1.0)
             ensure_adb_connected(adb_exe, log_fn)
 
-    cur = (run_adb(adb_exe, ["shell", "getenforce"]).stdout or "").strip()
-    log_fn(f"[SELINUX] Active kernel enforcement (getenforce): {cur or desired}")
+    final_cur = (run_adb(adb_exe, ["shell", "getenforce"], timeout=10).stdout or "").strip()
+    log_fn(f"[SELINUX] Active kernel enforcement (getenforce): {final_cur or desired}")
     return True
 
 

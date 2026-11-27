@@ -61,7 +61,7 @@ TEXTS: Dict[str, Dict[str, str]] = {
     "vi": {
         "win_title": "Android 13 Portable · Chạy Mượt Trên Windows 11",
         "header_title": "Android 13 Portable (LineageOS 20 GApps · Intel HD 4000)",
-        "header_sub": "Tối ưu cho chip Intel i5-3475S (Ivy Bridge) · Dual Initrd & OpenGL DirectX 11",
+        "header_sub": "Tối ưu cho chip Intel i5-3475S (Ivy Bridge) · Dual Initrd & Native SELinux Enforcing",
         "lang_btn": "Ngôn ngữ: VI / EN",
         "tab_main": "Điều Khiển Chính",
         "tab_apps": "Mở App Riêng Lẻ",
@@ -79,8 +79,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "spoof_label": "Biến hình thành điện thoại thật:",
         "accel_label": "Chế độ tăng tốc (WHPX / TCG):",
         "gpu_label": "Chế độ đồ họa (Intel HD 4000):",
-        "gpu_angle": "Tăng tốc phần cứng DirectX 11 (Chạy mượt hơn)",
-        "gpu_soft": "Chế độ dự phòng (Nếu bị đen màn hình)",
+        "gpu_angle": "VirtIO-SW llvmpipe (An toàn HD 4000)",
+        "gpu_soft": "Experimental VirGL (3D GLES/OpenGL)",
         "cpu_label": "Số nhân CPU sử dụng (i5-3475S):",
         "ram_label": "Dung lượng RAM cấp cho máy ảo:",
         "btn_start": "Bật Máy Ảo Android",
@@ -117,7 +117,7 @@ TEXTS: Dict[str, Dict[str, str]] = {
     "en": {
         "win_title": "Portable Android 13 · Windows 11 Launcher",
         "header_title": "Portable Android 13 (LineageOS 20 GApps · Intel HD 4000)",
-        "header_sub": "Tuned for Intel i5-3475S (Ivy Bridge) · Dual Initrd & OpenGL DirectX 11",
+        "header_sub": "Tuned for Intel i5-3475S (Ivy Bridge) · Dual Initrd & Native SELinux Enforcing",
         "lang_btn": "Language: EN / VI",
         "tab_main": "Main Control",
         "tab_apps": "Multi-Window Apps",
@@ -135,8 +135,8 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "spoof_label": "Disguise as Real Phone:",
         "accel_label": "CPU Acceleration (WHPX / TCG):",
         "gpu_label": "Graphics Mode (Intel HD 4000):",
-        "gpu_angle": "Hardware Acceleration DirectX 11 (Smoother)",
-        "gpu_soft": "Software Fallback (Use if black screen)",
+        "gpu_angle": "VirtIO-SW llvmpipe (HD 4000 Safe)",
+        "gpu_soft": "Experimental VirGL (3D GLES/OpenGL)",
         "cpu_label": "CPU Cores (Intel i5-3475S):",
         "ram_label": "System RAM Allocation:",
         "btn_start": "Start Android VM",
@@ -269,7 +269,10 @@ class PortableAndroidLauncher(BaseCTk):
         self.ram_gb = ctk.IntVar(value=int(cfg.get("ram_gb", 4)))
         self.selected_device = ctk.StringVar(value=cfg.get("device", "Google Pixel 8 Pro"))
         self.accel_mode = ctk.StringVar(value=cfg.get("accel_mode", "auto"))
-        self.gpu_choice = ctk.StringVar(value=cfg.get("gpu", "angle"))
+        raw_gpu = cfg.get("gpu", "software")
+        if raw_gpu == "angle":
+            raw_gpu = "software"
+        self.gpu_choice = ctk.StringVar(value=raw_gpu if raw_gpu in ("software", "virgl") else "software")
         self.active_profile = ctk.StringVar(value=cfg.get("profile", "Root_Modding"))
         self.loaded_profile: str = ""
         self.auto_clip_var = ctk.BooleanVar(value=bool(cfg.get("auto_clip", True)))
@@ -521,12 +524,12 @@ class PortableAndroidLauncher(BaseCTk):
         self.lbl_gpu.pack(side="left")
         self.gpu_seg = ctk.CTkSegmentedButton(
             r_gpu,
-            values=["DirectX 11 (HD 4000)", "Software"],
+            values=["VirtIO-SW (HD 4000 Safe)", "Experimental VirGL"],
             command=self._on_gpu_change,
             selected_color="#2563EB",
             fg_color="#0F172A",
         )
-        self.gpu_seg.set("DirectX 11 (HD 4000)" if self.gpu_choice.get() == "angle" else "Software")
+        self.gpu_seg.set("Experimental VirGL" if self.gpu_choice.get() == "virgl" else "VirtIO-SW (HD 4000 Safe)")
         self.gpu_seg.pack(side="right")
 
         # CPU Slider
@@ -858,7 +861,7 @@ class PortableAndroidLauncher(BaseCTk):
         self._save_config()
 
     def _on_gpu_change(self, val: str) -> None:
-        self.gpu_choice.set("angle" if "DirectX" in val else "software")
+        self.gpu_choice.set("virgl" if "VirGL" in val else "software")
         self._save_config()
 
     # ---------------- Storage Profile Actions ----------------
@@ -1043,6 +1046,12 @@ class PortableAndroidLauncher(BaseCTk):
                         boot_state["hwc_fail_count"] = boot_state.get("hwc_fail_count", 0) + 1
                 if "surfaceflinger" in low and ("killed by signal 9" in low or "signal 9" in low or ("restarting" in low and "hwcomposer" not in low)):
                     boot_state["sf_fail_count"] = boot_state.get("sf_fail_count", 0) + 1
+                if "has incorrect label or no domain transition" in low or "init encountered errors" in low:
+                    boot_state["selinux_domain_errors"] = boot_state.get("selinux_domain_errors", 0) + 1
+                if "user-defined mode not supported" in low:
+                    boot_state["drm_mode_error"] = True
+                if "starting service 'bootanim'" in low:
+                    boot_state["bootanim_seen"] = True
                 if (
                     "linux version" in low
                     or "[    0." in low
@@ -1137,7 +1146,12 @@ class PortableAndroidLauncher(BaseCTk):
 
         cores = max(1, min(4, int(self.cpu_cores.get())))
         ram_mb = ram_mb_override if ram_mb_override is not None else max(1536, min(6144, int(self.ram_gb.get()) * 1024))
-        use_angle = (self.gpu_choice.get() == "angle") if allow_angle is None else allow_angle
+        use_virgl = (self.gpu_choice.get() == "virgl") if allow_angle is None else allow_angle
+        selinux_arg = (
+            "androidboot.selinux=enforcing"
+            if self.selinux_mode.get() == "enforcing"
+            else "androidboot.selinux=permissive"
+        )
 
         # Intel Core i5-3475S (Ivy Bridge, NO AVX2/AVX512/BMI2) CPU + Hypervisor Matrix
         ivy_cpu = "IvyBridge,+ssse3,+sse4.1,+sse4.2,+popcnt"
@@ -1173,29 +1187,31 @@ class PortableAndroidLauncher(BaseCTk):
         if use_pio_fw_cfg:
             cmd += ["-global", "fw_cfg.dma_enabled=off"]
 
-        # Intel HD Graphics 4000 (OpenGL 4.0 / DirectX 11 ANGLE, NO Vulkan):
-        # Cascade: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on/OpenGL 4.0) -> virtio-vga (DRM llvmpipe, gl=off) -> -vga std
-        if use_angle and gl_device_mode == "vga_gl":
+        # Intel HD Graphics 4000 Safe Cascade:
+        # Default Auto: virtio-vga (DRM llvmpipe, gl=off, EDID 1280x720) -> -vga std (gl=off)
+        # Experimental VirGL: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on) -> virtio-vga (llvmpipe) -> -vga std
+        if use_virgl and gl_device_mode == "vga_gl":
             cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=es"]
-            gfx_cmdline = "HWACCEL=1 video=1280x720"
+            gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "vga_gl_desktop":
             cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=on"]
-            gfx_cmdline = "HWACCEL=1 video=1280x720"
+            gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "gpu_gl_pci":
             cmd += ["-vga", "none", "-device", "virtio-gpu-gl-pci,xres=1280,yres=720", "-display", "sdl,gl=on"]
-            gfx_cmdline = "HWACCEL=1 video=1280x720"
+            gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "virtio_sw":
             cmd += ["-device", "virtio-vga,xres=1280,yres=720", "-display", "sdl,gl=off"]
-            gfx_cmdline = "HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb video=1280x720"
+            gfx_cmdline = "HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb"
         else:
             cmd += ["-vga", "std", "-display", "sdl,gl=off"]
-            gfx_cmdline = "HWACCEL=0 EGL=angle HWC_HIDL=drmfb video=1280x720"
+            gfx_cmdline = "HWACCEL=0 EGL=angle HWC_HIDL=drmfb"
 
         if diag_log_path is not None:
             cmd += ["-d", "guest_errors,cpu_reset", "-D", str(diag_log_path)]
 
         serial_target = f"file:{serial_log_path}" if serial_log_path is not None else "stdio"
         cmd += [
+            "-device", "virtio-rng-pci",
             "-device", "virtio-balloon-pci",
             "-usb",
             "-device", "usb-tablet",
@@ -1212,7 +1228,7 @@ class PortableAndroidLauncher(BaseCTk):
             "-initrd", str(initrd_file),
             "-append", (
                 "root=/dev/ram0 androidboot.hardware=android_x86_64 "
-                "androidboot.selinux=permissive androidboot.init_fatal_panic=true "
+                f"{selinux_arg} androidboot.init_fatal_panic=true "
                 f"{gfx_cmdline} "
                 "DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 "
                 "nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 "
@@ -1242,12 +1258,11 @@ class PortableAndroidLauncher(BaseCTk):
                 if size < min_bytes:
                     issues.append(f"Corrupted/too small {label} ({size} bytes): {path}")
 
-        allow_angle = self.gpu_choice.get() == "angle"
-        if allow_angle:
+        allow_virgl = self.gpu_choice.get() == "virgl"
+        if allow_virgl:
             has_egl = (self.bin_dir / "libEGL.dll").exists() and (self.bin_dir / "libGLESv2.dll").exists()
             if not has_egl:
-                console_log("[PREFLIGHT] ANGLE DLLs (libEGL.dll/libGLESv2.dll) missing -> auto-falling back to Software GPU (-vga std).")
-                allow_angle = False
+                console_log("[PREFLIGHT] ANGLE DLLs (libEGL.dll/libGLESv2.dll) missing; Experimental VirGL will use desktop GL or fallback to VirtIO-SW.")
 
         initial_ram_mb = max(1536, min(6144, int(self.ram_gb.get()) * 1024))
         mem_info = self._get_windows_free_ram_mb()
@@ -1269,16 +1284,17 @@ class PortableAndroidLauncher(BaseCTk):
         if not issues:
             console_log(
                 f"[PREFLIGHT] OK · Kernel={kernel_name} · Initrd={initrd_file.name} · Accel={self.accel_mode.get().upper()} · "
-                f"RAM={initial_ram_mb}MB · GPU={'ANGLE-D3D11 (virtio-vga-gl)' if allow_angle else 'VirtIO-SW (gl=off)'}"
+                f"SELinux={self.selinux_mode.get().upper()} · RAM={initial_ram_mb}MB · "
+                f"GPU={'Experimental VirGL' if allow_virgl else 'VirtIO-SW llvmpipe (gl=off)'}"
             )
-        return (len(issues) == 0, issues, allow_angle, initial_ram_mb)
+        return (len(issues) == 0, issues, allow_virgl, initial_ram_mb)
 
     def start_vm(self) -> None:
         if self.vm_process is not None and self.vm_process.poll() is None:
             console_log("[VM] QEMU is already running.")
             return
 
-        ok, issues, allow_angle, initial_ram_mb = self._preflight_check()
+        ok, issues, allow_virgl, initial_ram_mb = self._preflight_check()
         if not ok:
             console_log("[PREFLIGHT] Failed:\n  - " + "\n  - ".join(issues))
             messagebox.showerror("Pre-Flight Check Failed", "Cannot start Android VM:\n" + "\n".join(issues))
@@ -1292,9 +1308,10 @@ class PortableAndroidLauncher(BaseCTk):
         self.ksu_switch.configure(state="disabled")
         self.selinux_seg.configure(state="disabled")
         self.accel_seg.configure(state="disabled")
+        self.gpu_seg.configure(state="disabled")
         threading.Thread(
             target=self._launch_vm_worker,
-            args=(allow_angle, initial_ram_mb),
+            args=(allow_virgl, initial_ram_mb),
             daemon=True,
         ).start()
 
@@ -1648,14 +1665,24 @@ class PortableAndroidLauncher(BaseCTk):
                             boot_state["hpet_opt_error"] = True
                         if "fw_cfg" in low and ("not found" in low or "invalid" in low or "unknown" in low or "property" in low):
                             boot_state["fwcfg_opt_error"] = True
-                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "virtio-vga", "opengl is not available", "unable to create opengl context", "vrend", "virgl", "egl", "gl=es", "gl=on")):
-                            if any(err in low for err in ("not found", "invalid", "unknown", "unsupported", "could not", "failed", "unable to", "no such", "error")):
+                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "virtio-vga", "opengl is not available", "unable to create opengl context", "vrend", "virgl", "egl", "gl=es", "gl=on", "illegal command buffer", "failed to dispatch", "context error reported")):
+                            if any(err in low for err in ("not found", "invalid", "unknown", "unsupported", "could not", "failed", "unable to", "no such", "error", "illegal", "vrend_check_no_error", "vrend_decode_ctx_submit_cmd")):
                                 boot_state["gl_opt_error"] = True
                                 if gl_device_mode in ("vga_gl", "vga_gl_desktop", "gpu_gl_pci") and any(
-                                    vf in low for vf in ("virgl could not be initialized", "failed to initialize vrend", "unable to create opengl context", "opengl is not available")
+                                    vf in low for vf in (
+                                        "virgl could not be initialized",
+                                        "failed to initialize vrend",
+                                        "unable to create opengl context",
+                                        "opengl is not available",
+                                        "vrend_check_no_error",
+                                        "vrend_decode_ctx_submit_cmd",
+                                        "illegal command buffer",
+                                        "failed to dispatch",
+                                        "context error reported",
+                                    )
                                 ):
                                     console_log(
-                                        f"[RETRY-FAST] VirGL/OpenGL context failed on '{gl_device_mode}' ({clean}) -> stepping down GPU immediately..."
+                                        f"[RETRY-FAST] VirGL/OpenGL command buffer or context failed on '{gl_device_mode}' ({clean}) -> stepping down GPU immediately..."
                                     )
                                     self._force_kill_vm(proc)
                                     break
@@ -1830,10 +1857,10 @@ class PortableAndroidLauncher(BaseCTk):
         else:
             kernel_tag = "Stock"
         sel_tag = self.selinux_mode.get().upper()
-        self._set_status(f"Online ({kernel_tag} · Stage-1 Permissive -> {sel_tag}) · ADB 127.0.0.1:5555")
-        console_log(f"[ADB] Connected! Running restorecon, KSU sepolicy patches & setting SELinux -> {sel_tag}...")
+        self._set_status(f"Online ({kernel_tag} · SELinux {sel_tag}) · ADB 127.0.0.1:5555")
+        console_log(f"[ADB] Connected! Verifying native SELinux & storage labels ({sel_tag})...")
         spoof_device.ensure_selinux_boot_health(str(self.adb_exe), self.selinux_mode.get(), console_log)
-        self._set_status(f"Online ({kernel_tag} · {sel_tag}) · ADB 127.0.0.1:5555")
+        self._set_status(f"Online ({kernel_tag} · SELinux {sel_tag}) · ADB 127.0.0.1:5555")
         console_log("[ADB] Streaming adb logcat...")
         self.after(500, self.refresh_installed_apps)
 
@@ -1864,6 +1891,7 @@ class PortableAndroidLauncher(BaseCTk):
         self.ksu_switch.configure(state="normal")
         self.selinux_seg.configure(state="normal")
         self.accel_seg.configure(state="normal")
+        self.gpu_seg.configure(state="normal")
         self.status_text.set(self.t("status_idle"))
 
     def _set_status(self, text: str) -> None:
