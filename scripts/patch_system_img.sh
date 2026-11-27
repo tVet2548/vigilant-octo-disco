@@ -156,6 +156,11 @@ if ! echo "${INIT_ARCH}" | grep -qiE 'ELF 64-bit.*x86-64' || echo "${INIT_ARCH}"
   echo "ERROR: system.img /bin/init is NOT x86-64 ELF (${INIT_ARCH})! Rejecting non-x86_64 image." >&2
   exit 1
 fi
+if command -v readelf >/dev/null 2>&1; then
+  echo "Inspecting /bin/init ELF PT_INTERP:"
+  readelf -l "${SYS_ROOT}/bin/init" 2>/dev/null | grep -E 'ELF file type|Requesting program interpreter' || echo "  (static ELF or no PT_INTERP)"
+fi
+ls -ld "${SYS_ROOT}/bin/linker"* "${SYS_ROOT}/bin/bootstrap/linker"* 2>/dev/null || true
 
 PROP_FILE=""
 for CANDIDATE_PROP in "${WORK_DIR}/mnt/system/build.prop" "${WORK_DIR}/mnt/build.prop"; do
@@ -619,11 +624,15 @@ static void check_path(const char *label, const char *path) {
     long r = sc2(SYS_lstat, (long)path, (long)&st);
     if (r == 0) {
         long xok = (sc2(SYS_access, (long)path, X_OK) == 0) ? 1 : 0;
+        unsigned long fmt = (unsigned long)(st.st_mode & 0170000);
+        const char *kind = (fmt == 0120000UL) ? "lnk" : ((fmt == 0040000UL) ? "dir" : "reg");
         o = dp_push_str(buf, o, sizeof(buf), "[INIT-WRAPPER] OK   ");
         o = dp_push_str(buf, o, sizeof(buf), label);
         o = dp_push_str(buf, o, sizeof(buf), " -> ");
         o = dp_push_str(buf, o, sizeof(buf), path);
-        o = dp_push_str(buf, o, sizeof(buf), " (mode=");
+        o = dp_push_str(buf, o, sizeof(buf), " (type=");
+        o = dp_push_str(buf, o, sizeof(buf), kind);
+        o = dp_push_str(buf, o, sizeof(buf), ", mode=");
         o = dp_push_num(buf, o, sizeof(buf), (long)(st.st_mode & 0777), 8);
         o = dp_push_str(buf, o, sizeof(buf), ", x=");
         o = dp_push_num(buf, o, sizeof(buf), xok, 10);
@@ -723,6 +732,7 @@ int c_main(int argc, char **argv, char **envp) {
 
     check_path("/init", "/init");
     check_path("/system/bin/init", "/system/bin/init");
+    check_path("/system/bin/bootstrap/linker64", "/system/bin/bootstrap/linker64");
     check_path("/system/bin/linker64", "/system/bin/linker64");
     check_path("root fstab", "/fstab.android_x86_64");
     check_path("vendor fstab", "/vendor/etc/fstab.android_x86_64");
@@ -732,8 +742,17 @@ int c_main(int argc, char **argv, char **envp) {
     check_path("/linkerconfig", "/linkerconfig");
     check_path("/data/adb/ksud", "/data/adb/ksud");
 
-    if (sc2(SYS_access, (long)"/init", X_OK) != 0 || sc2(SYS_access, (long)"/system/bin/linker64", X_OK) != 0) {
-        write_line("[INIT-WRAPPER] FATAL: /init or linker64 missing/not executable; stalling 25s for log flush...");
+    /* Note: /system/bin/linker64 is a symlink to /apex/com.android.runtime/bin/linker64
+     * which does not exist until Android init mounts bootstrap APEXes; /system/bin/init
+     * uses either static linkage or /system/bin/bootstrap/linker64. */
+    const char *init_exec = NULL;
+    if (sc2(SYS_access, (long)"/init", X_OK) == 0) {
+        init_exec = "/init";
+    } else if (sc2(SYS_access, (long)"/system/bin/init", X_OK) == 0) {
+        init_exec = "/system/bin/init";
+    }
+    if (!init_exec) {
+        write_line("[INIT-WRAPPER] FATAL: /init and /system/bin/init missing/not executable; stalling 25s for log flush...");
         dp_usleep(25000000L);
         return 1;
     }
@@ -758,13 +777,17 @@ int c_main(int argc, char **argv, char **envp) {
     if (g_kmsg >= 0) sc1(SYS_close, g_kmsg);
 
     char *init_argv[16];
-    init_argv[0] = "/init";
+    init_argv[0] = (char *)init_exec;
     int copy_cnt = (argc > 1) ? ((argc < 15) ? argc : 15) : 1;
     for (int i = 1; i < copy_cnt; i++) {
         init_argv[i] = argv[i];
     }
     init_argv[copy_cnt] = NULL;
-    long ex = sc3(SYS_execve, (long)"/init", (long)init_argv, (long)envp);
+    long ex = sc3(SYS_execve, (long)init_exec, (long)init_argv, (long)envp);
+    if (ex < 0 && init_exec[1] == 'i') {
+        init_argv[0] = "/system/bin/init";
+        ex = sc3(SYS_execve, (long)"/system/bin/init", (long)init_argv, (long)envp);
+    }
 
     g_tty = (int)sc3(SYS_open, (long)"/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK, 0);
     if (g_tty < 0) g_tty = 1;

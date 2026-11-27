@@ -1167,12 +1167,13 @@ class PortableAndroidLauncher(BaseCTk):
             cmd += ["-global", "fw_cfg.dma_enabled=off"]
 
         # Intel HD Graphics 4000 (OpenGL 4.0 / DirectX 11 ANGLE, NO Vulkan):
-        # Cascade: virtio-vga-gl -> virtio-gpu-gl-pci -> virtio-vga (DRM llvmpipe, gl=off) -> -vga std
-        if use_angle and gl_device_mode in ("vga_gl", "gpu_gl_pci"):
-            dev_spec = "virtio-vga-gl,xres=1280,yres=720" if gl_device_mode == "vga_gl" else "virtio-gpu-gl-pci,xres=1280,yres=720"
-            if gl_device_mode == "gpu_gl_pci":
-                cmd += ["-vga", "none"]
-            cmd += ["-device", dev_spec, "-display", "sdl,gl=es"]
+        # Cascade: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on/OpenGL 4.0) -> virtio-vga (DRM llvmpipe, gl=off) -> -vga std
+        if use_angle and gl_device_mode == "vga_gl":
+            cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=es"]
+        elif gl_device_mode == "vga_gl_desktop":
+            cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=on"]
+        elif gl_device_mode == "gpu_gl_pci":
+            cmd += ["-vga", "none", "-device", "virtio-gpu-gl-pci,xres=1280,yres=720", "-display", "sdl,gl=on"]
         elif gl_device_mode == "virtio_sw":
             cmd += ["-device", "virtio-vga,xres=1280,yres=720", "-display", "sdl,gl=off"]
         else:
@@ -1395,10 +1396,8 @@ class PortableAndroidLauncher(BaseCTk):
                     cascade.append(("whpx_pc_stock", False, "kernel_stock"))
                 cascade.append(("tcg_stock", False, "kernel_stock"))
 
-        env = os.environ.copy()
-        env["PATH"] = f"{self.bin_dir};{env.get('PATH', '')}"
-        env["SDL_OPENGL_ES_DRIVER"] = "1"
-        env["ANGLE_DEFAULT_PLATFORM"] = "d3d11"
+        base_env = os.environ.copy()
+        base_env["PATH"] = f"{self.bin_dir};{base_env.get('PATH', '')}"
 
         fatal_markers = (
             "unexpected vp exit",
@@ -1453,6 +1452,14 @@ class PortableAndroidLauncher(BaseCTk):
                 except Exception:
                     pass
 
+                tier_env = base_env.copy()
+                if gl_device_mode == "vga_gl":
+                    tier_env["SDL_OPENGL_ES_DRIVER"] = "1"
+                    tier_env["ANGLE_DEFAULT_PLATFORM"] = "d3d11"
+                else:
+                    tier_env.pop("SDL_OPENGL_ES_DRIVER", None)
+                    tier_env.pop("ANGLE_DEFAULT_PLATFORM", None)
+
                 cmd = self._build_qemu_cmd(
                     tier_id,
                     allow_angle=tier_angle,
@@ -1472,7 +1479,7 @@ class PortableAndroidLauncher(BaseCTk):
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(self.bin_dir),
-                    env=env,
+                    env=tier_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1601,9 +1608,17 @@ class PortableAndroidLauncher(BaseCTk):
                             boot_state["hpet_opt_error"] = True
                         if "fw_cfg" in low and ("not found" in low or "invalid" in low or "unknown" in low or "property" in low):
                             boot_state["fwcfg_opt_error"] = True
-                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "virtio-vga", "opengl is not available", "egl", "gl=es", "virgl")):
-                            if any(err in low for err in ("not found", "invalid", "unknown", "unsupported", "could not", "failed", "no such", "error")):
+                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "virtio-vga", "opengl is not available", "unable to create opengl context", "vrend", "virgl", "egl", "gl=es", "gl=on")):
+                            if any(err in low for err in ("not found", "invalid", "unknown", "unsupported", "could not", "failed", "unable to", "no such", "error")):
                                 boot_state["gl_opt_error"] = True
+                                if gl_device_mode in ("vga_gl", "vga_gl_desktop", "gpu_gl_pci") and any(
+                                    vf in low for vf in ("virgl could not be initialized", "failed to initialize vrend", "unable to create opengl context", "opengl is not available")
+                                ):
+                                    console_log(
+                                        f"[RETRY-FAST] VirGL/OpenGL context failed on '{gl_device_mode}' ({clean}) -> stepping down GPU immediately..."
+                                    )
+                                    self._force_kill_vm(proc)
+                                    break
                         if "invalid option" in low:
                             if use_hpet_off:
                                 boot_state["hpet_opt_error"] = True
@@ -1628,13 +1643,14 @@ class PortableAndroidLauncher(BaseCTk):
                 console_log(f"[QEMU · {tier_id} · {tier_kernel}] Exited with code {rc} after {elapsed:.1f}s")
 
                 _gl_next = {
-                    "vga_gl": "gpu_gl_pci",
+                    "vga_gl": "vga_gl_desktop",
+                    "vga_gl_desktop": "virtio_sw",
                     "gpu_gl_pci": "virtio_sw",
                     "virtio_sw": "std",
                 }
                 if not self.stop_log_threads.is_set() and boot_state["gl_opt_error"] and gl_device_mode in _gl_next:
                     next_gl = _gl_next[gl_device_mode]
-                    console_log(f"[RETRY] Display/GL device '{gl_device_mode}' unsupported -> stepping down to '{next_gl}'...")
+                    console_log(f"[RETRY] Display/GL device '{gl_device_mode}' unsupported/failed -> stepping down to '{next_gl}'...")
                     gl_device_mode = next_gl
                     continue
 
@@ -1700,7 +1716,7 @@ class PortableAndroidLauncher(BaseCTk):
 
             if pre_kernel_failed and not diag_captured and (tier_id.startswith("tcg") or idx == len(cascade) - 1 or (idx + 1 < len(cascade) and cascade[idx + 1][2] != tier_kernel)):
                 diag_captured = True
-                self._capture_prekernel_diag(env, tier_ram_mb, tier_kernel)
+                self._capture_prekernel_diag(base_env, tier_ram_mb, tier_kernel)
 
             early_boot_failed = (
                 not self.stop_log_threads.is_set()
