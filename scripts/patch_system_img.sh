@@ -994,7 +994,16 @@ s_cnt, s_err = label_tree(mnt_root, "", "u:object_r:system_file:s0", only_missin
 print(f"Filled missing security.selinux xattrs in system.img: {s_cnt} entries (errors={s_err})")
 
 data_ctx = match_ctx("/data", True, False, "u:object_r:system_data_root_file:s0")
-pathlib.Path("/tmp/data_root_secontext").write_text(data_ctx, encoding="utf-8")
+ctx_path = pathlib.Path("/tmp/data_root_secontext")
+ctx_path.unlink(missing_ok=True)
+ctx_path.write_text(data_ctx, encoding="utf-8")
+os.chmod(ctx_path, 0o644)
+suid, sgid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
+if suid and sgid:
+    try:
+        os.chown(ctx_path, int(suid), int(sgid))
+    except OSError:
+        pass
 print(f"Resolved /data root SELinux context -> {data_ctx}")
 XATTRPY
 
@@ -1915,4 +1924,7 @@ chmod 0644 "${MOD_STAGE}/module.prop"
 rm -f "${MOD_OUT_DIR}/Portable_Stealth_KSU.zip"
 (cd "${MOD_STAGE}" && 7z a -tzip -mx=9 "${MOD_OUT_DIR}/Portable_Stealth_KSU.zip" ./* >/dev/null)
 rm -rf "${MOD_STAGE}"
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+  chown -R "${SUDO_UID}:${SUDO_GID}" "${BUNDLE_DIR}" 2>/dev/null || true
+fi
 ls -lh "${MOD_OUT_DIR}/Portable_Stealth_KSU.zip"

@@ -170,9 +170,9 @@ jobs:
           sudo mount -o loop "${RAW_DATA}" "${DATA_MNT}"
           sudo python3 -c 'import os, sys; os.setxattr(sys.argv[1], b"security.selinux", sys.argv[2].encode("utf-8") + b"\x00", follow_symlinks=False)' "${DATA_MNT}" "${DATA_CTX}"
           sudo sync
-          sudo umount "${DATA_MNT}"
-          rmdir "${DATA_MNT}"
-          rm -f /tmp/data_root_secontext
+          sudo umount "${DATA_MNT}" || sudo umount -lf "${DATA_MNT}" || true
+          rm -rf "${DATA_MNT}"
+          sudo rm -f /tmp/data_root_secontext
           e2fsck -f -y "${RAW_DATA}" || true
           qemu-img convert -c -O qcow2 "${RAW_DATA}" "${BUNDLE_DIR}/images/data_clean.qcow2"
           cp -f "${BUNDLE_DIR}/images/data_clean.qcow2" "${BUNDLE_DIR}/images/data.img"

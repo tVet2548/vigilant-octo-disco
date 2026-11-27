@@ -732,4 +732,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
 fi
 
 rm -rf "${WORK_DIR}"
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+  chown -R "${SUDO_UID}:${SUDO_GID}" "${BUNDLE_DIR}" 2>/dev/null || true
+fi
 ls -lh "${IMG_DIR}"
