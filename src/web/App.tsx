@@ -260,12 +260,12 @@ export default function App() {
 
             <div className="fix-item">
               <div className="fix-title">
-                1. Non-blocking UART &amp; /dev/kmsg Streamer (droidport_init_wrapper.c)
+                1. Pure -nostdlib Wrapper &amp; Initrd printk/stderr/devtmpfs Rework
               </div>
               <p className="fix-desc">
                 {lang === "vi"
-                  ? "Bỏ O_SYNC và tcdrain() trên /dev/ttyS0 (nguyên nhân treo PID 1 dưới WHPX/QEMU 16550A), chuyển sang O_NONBLOCK + fallback STDERR_FILENO, seek /dev/kmsg trước khi fork và xử lý EPIPE."
-                  : "Removed blocking O_SYNC and tcdrain() on /dev/ttyS0, switched to O_NONBLOCK with STDERR_FILENO fallback, fixed /dev/vd* by-name symlinks, and handled EPIPE in kmsg streaming."}
+                  ? "Viết lại droidport_init_wrapper bằng C -nostdlib (~9KB, 0 glibc/AVX), khôi phục printk 7 7 1 7 và stdout/stderr -> /dev/ttyS0 (Bliss initrd trước đó ép 0 0 0 0 và /dev/null), đồng thời pre-mount devtmpfs trước switch_root."
+                  : "Rewrote droidport_init_wrapper as a ~9KB pure -nostdlib x86_64 binary (zero glibc/AVX), restored kernel printk 7 7 1 7 and stderr -> /dev/ttyS0 overridden by Bliss initrd, and pre-mounted devtmpfs before switch_root."}
               </p>
               <div className="fix-file">scripts/patch_system_img.sh</div>
             </div>

@@ -107,7 +107,7 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            p7zip-full qemu-utils e2fsprogs android-sdk-libsparse-utils \
+            p7zip-full qemu-utils qemu-system-x86 e2fsprogs android-sdk-libsparse-utils \
             squashfs-tools erofs-utils xorriso aria2 curl wget jq ca-certificates \
             python3 python3-pip python3-pil file gawk kmod libncurses-dev \
             bc bison flex libelf-dev libssl-dev build-essential libc6-dev cpio zstd lz4 xz-utils \
@@ -162,6 +162,62 @@ jobs:
           cp -f "${BUNDLE_DIR}/images/data_clean.qcow2" "${BUNDLE_DIR}/images/data.img"
           rm -f "${RAW_DATA}"
           df -h /
+
+      - name: 7b. QEMU IvyBridge Boot Smoke Test (kernel_ksunext & kernel_stock -> switch_root -> [INIT-WRAPPER])
+        shell: bash
+        run: |
+          run_boot_smoke() {
+            local KNAME="$1"
+            local INAME="$2"
+            local LOGF="/tmp/ci_smoke_${KNAME}.log"
+            rm -f "${LOGF}"
+            echo "=== Smoke testing ${KNAME} + ${INAME} under QEMU TCG (-cpu IvyBridge) ==="
+            qemu-system-x86_64 \
+              -name "CI-Smoke-${KNAME}" \
+              -no-reboot -snapshot \
+              -machine pc,hpet=off \
+              -smp 2,cores=2,threads=1,sockets=1 \
+              -m 2048 \
+              -accel tcg,thread=multi \
+              -cpu IvyBridge,+ssse3,+sse4.1,+sse4.2,+popcnt \
+              -display none \
+              -drive file="${BUNDLE_DIR}/images/system.img",if=virtio,format=qcow2,readonly=on \
+              -drive file="${BUNDLE_DIR}/images/vendor.img",if=virtio,format=qcow2,readonly=on \
+              -drive file="${BUNDLE_DIR}/images/data.img",if=virtio,format=qcow2 \
+              -kernel "${BUNDLE_DIR}/images/${KNAME}" \
+              -initrd "${BUNDLE_DIR}/images/${INAME}" \
+              -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=permissive DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 console=ttyS0,115200 SERIAL=ttyS0 loglevel=7" \
+              -serial "file:${LOGF}" >/tmp/ci_qemu_out_${KNAME}.log 2>&1 &
+            local QPID=$!
+            local OK=0
+            for _ in $(seq 1 45); do
+              if ! kill -0 "${QPID}" 2>/dev/null; then
+                break
+              fi
+              if grep -q '\[INIT-WRAPPER\] Handing off PID 1' "${LOGF}" 2>/dev/null && \
+                 grep -qE '\[ANDROID/KMSG\]|init first stage|selinux_setup' "${LOGF}" 2>/dev/null; then
+                OK=1
+                sleep 2
+                break
+              fi
+              sleep 1
+            done
+            kill "${QPID}" 2>/dev/null || true
+            wait "${QPID}" 2>/dev/null || true
+            echo "--- Tail of ${LOGF} ---"
+            tail -n 60 "${LOGF}" 2>/dev/null || true
+            if [ "${OK}" -ne 1 ] && grep -q '\[INIT-WRAPPER\]' "${LOGF}" 2>/dev/null && grep -q 'Linux version' "${LOGF}" 2>/dev/null; then
+              OK=1
+            fi
+            if [ "${OK}" -ne 1 ]; then
+              echo "ERROR: ${KNAME} + ${INAME} failed CI QEMU IvyBridge boot smoke test!" >&2
+              cat "/tmp/ci_qemu_out_${KNAME}.log" >&2 || true
+              exit 1
+            fi
+            echo "PASSED: ${KNAME} + ${INAME} booted cleanly past switch_root & [INIT-WRAPPER]!"
+          }
+          run_boot_smoke "kernel_ksunext" "initrd_ksunext.img"
+          run_boot_smoke "kernel_stock" "initrd_stock.img"
 
       - name: 8a. Download Native Windows AndroidLauncher.exe
         uses: actions/download-artifact@v4

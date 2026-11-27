@@ -214,7 +214,10 @@ EOF
 
 # Ensure all required Android root directories, real /sbin dir, and /init symlink exist
 for ROOT_SUB in dev proc sys mnt vendor data metadata apex linkerconfig debug_ramdisk first_stage_ramdisk tmp; do
-  [ -e "${WORK_DIR}/mnt/${ROOT_SUB}" ] || mkdir -p "${WORK_DIR}/mnt/${ROOT_SUB}"
+  if [ -L "${WORK_DIR}/mnt/${ROOT_SUB}" ] || { [ -e "${WORK_DIR}/mnt/${ROOT_SUB}" ] && [ ! -d "${WORK_DIR}/mnt/${ROOT_SUB}" ]; }; then
+    rm -f "${WORK_DIR}/mnt/${ROOT_SUB}"
+  fi
+  mkdir -p "${WORK_DIR}/mnt/${ROOT_SUB}"
 done
 if [ -L "${WORK_DIR}/mnt/sbin" ]; then
   rm -f "${WORK_DIR}/mnt/sbin"
@@ -326,6 +329,21 @@ EOF
         cp -f "${SYS_SE_DIR}/mapping/${LATEST_MAP}.compat.cil" "${SYS_SE_DIR}/mapping/${PLAT_VER}.compat.cil"
       fi
     fi
+    if [ -n "${PLAT_VER}" ]; then
+      for PART_SE in \
+        "${WORK_DIR}/mnt/system_ext/etc/selinux" \
+        "${SYS_ROOT}/system_ext/etc/selinux" \
+        "${WORK_DIR}/mnt/product/etc/selinux" \
+        "${SYS_ROOT}/product/etc/selinux"; do
+        if [ -d "${PART_SE}/mapping" ] && [ ! -f "${PART_SE}/mapping/${PLAT_VER}.cil" ]; then
+          PART_LATEST=$(ls -1 "${PART_SE}/mapping/"*.cil 2>/dev/null | grep -v '\.compat\.' | sort -V | tail -n1 | xargs -r basename | sed 's/\.cil$//' || echo "")
+          if [ -n "${PART_LATEST}" ] && [ -f "${PART_SE}/mapping/${PART_LATEST}.cil" ]; then
+            cp -f "${PART_SE}/mapping/${PART_LATEST}.cil" "${PART_SE}/mapping/${PLAT_VER}.cil"
+            echo "Reconciled ${PART_SE}/mapping/${PLAT_VER}.cil -> ${PART_LATEST}.cil"
+          fi
+        fi
+      done
+    fi
 
     # Remove Bliss precompiled_sepolicy so Android SetupSelinux compiles cleanly with LineageOS 20 system CILs
     rm -f "${VEN_SE_DIR}/precompiled_sepolicy"*
@@ -406,7 +424,7 @@ def comment_line(path: pathlib.Path, line_no: int) -> bool:
         return True
     return False
 
-for attempt in range(25):
+for attempt in range(150):
     proc = subprocess.run(
         ["secilc", "-m", "-M", "true", "-G", "-N", "-c", "30", *cil_files, "-o", "/tmp/healed_policy.bin", "-f", "/dev/null"],
         capture_output=True, text=True
@@ -442,17 +460,120 @@ CILPY
   fi
 fi
 
-# Compile static C PID-1 /init diagnostic wrapper & non-blocking kmsg->ttyS0 streamer
-echo "Compiling static PID-1 /init wrapper (/sbin/droidport_init_wrapper)..."
+# Compile pure -nostdlib static x86_64 PID-1 /init diagnostic wrapper (zero glibc/AVX/IFUNC overhead)
+echo "Compiling pure -nostdlib static PID-1 /init wrapper (/sbin/droidport_init_wrapper)..."
 cat <<'CEOF' > "${WORK_DIR}/droidport_init_wrapper.c"
 #define _GNU_SOURCE
-#include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/mount.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include <sys/syscall.h>
+
+#ifndef F_OK
+#define F_OK 0
+#define X_OK 1
+#endif
+#ifndef SEEK_END
+#define SEEK_END 2
+#endif
+#ifndef EAGAIN
+#define EAGAIN 11
+#define EWOULDBLOCK 11
+#define EINTR 4
+#define EPIPE 32
+#endif
+
+struct dp_timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+static inline long sc0(long n) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+    return ret;
+}
+static inline long sc1(long n, long a1) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a1) : "rcx", "r11", "memory");
+    return ret;
+}
+static inline long sc2(long n, long a1, long a2) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2) : "rcx", "r11", "memory");
+    return ret;
+}
+static inline long sc3(long n, long a1, long a2, long a3) {
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2), "d"(a3) : "rcx", "r11", "memory");
+    return ret;
+}
+static inline long sc5(long n, long a1, long a2, long a3, long a4, long a5) {
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8 __asm__("r8") = a5;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static size_t dp_strlen(const char *s) {
+    size_t n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static char *dp_strchr(const char *s, int c) {
+    while (*s) {
+        if (*s == (char)c) return (char *)s;
+        s++;
+    }
+    return NULL;
+}
+
+static int dp_strstr(const char *hay, const char *needle) {
+    size_t nlen = dp_strlen(needle);
+    if (!nlen) return 1;
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < nlen && hay[i] && hay[i] == needle[i]) i++;
+        if (i == nlen) return 1;
+    }
+    return 0;
+}
+
+static size_t dp_push_str(char *dst, size_t off, size_t cap, const char *s) {
+    while (*s && off + 1 < cap) dst[off++] = *s++;
+    dst[off] = '\0';
+    return off;
+}
+
+static size_t dp_push_num(char *dst, size_t off, size_t cap, long val, int base) {
+    char tmp[32];
+    int i = 0;
+    unsigned long uv;
+    if (val < 0 && base == 10) {
+        if (off + 1 < cap) dst[off++] = '-';
+        uv = (unsigned long)(-val);
+    } else {
+        uv = (unsigned long)val;
+    }
+    if (uv == 0) tmp[i++] = '0';
+    while (uv > 0 && i < 31) {
+        tmp[i++] = (char)('0' + (uv % (unsigned long)base));
+        uv /= (unsigned long)base;
+    }
+    while (i > 0 && off + 1 < cap) dst[off++] = tmp[--i];
+    dst[off] = '\0';
+    return off;
+}
+
+static void dp_usleep(long usec) {
+    struct dp_timespec ts;
+    ts.tv_sec = usec / 1000000L;
+    ts.tv_nsec = (usec % 1000000L) * 1000L;
+    sc2(SYS_nanosleep, (long)&ts, 0);
+}
 
 static int g_tty = -1;
 static int g_kmsg = -1;
@@ -461,13 +582,14 @@ static void safe_write_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     int retries = 0;
     while (off < len && retries < 200) {
-        ssize_t n = write(fd, buf + off, len - off);
+        long n = sc3(SYS_write, fd, (long)(buf + off), (long)(len - off));
         if (n > 0) {
             off += (size_t)n;
             continue;
         }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            usleep(1000);
+        long err = -n;
+        if (n < 0 && (err == EAGAIN || err == EWOULDBLOCK || err == EINTR)) {
+            dp_usleep(1000);
             retries++;
             continue;
         }
@@ -476,55 +598,73 @@ static void safe_write_all(int fd, const char *buf, size_t len) {
 }
 
 static void write_line(const char *msg) {
-    size_t len = strlen(msg);
-    int out_fd = (g_tty >= 0) ? g_tty : STDERR_FILENO;
+    size_t len = dp_strlen(msg);
+    int out_fd = (g_tty >= 0) ? g_tty : 2;
     safe_write_all(out_fd, msg, len);
     safe_write_all(out_fd, "\n", 1);
     if (g_kmsg >= 0) {
         char kbuf[512];
-        int n = snprintf(kbuf, sizeof(kbuf), "<6>%s\n", msg);
-        if (n > 0) {
-            safe_write_all(g_kmsg, kbuf, (size_t)n);
-        }
+        size_t o = 0;
+        o = dp_push_str(kbuf, o, sizeof(kbuf), "<6>");
+        o = dp_push_str(kbuf, o, sizeof(kbuf), msg);
+        o = dp_push_str(kbuf, o, sizeof(kbuf), "\n");
+        safe_write_all(g_kmsg, kbuf, o);
     }
 }
 
 static void check_path(const char *label, const char *path) {
     struct stat st;
     char buf[384];
-    if (lstat(path, &st) == 0) {
-        snprintf(buf, sizeof(buf), "[INIT-WRAPPER] OK   %-24s -> %s (mode=%o, x=%d)",
-                 label, path, st.st_mode & 0777, access(path, X_OK) == 0 ? 1 : 0);
+    size_t o = 0;
+    long r = sc2(SYS_lstat, (long)path, (long)&st);
+    if (r == 0) {
+        long xok = (sc2(SYS_access, (long)path, X_OK) == 0) ? 1 : 0;
+        o = dp_push_str(buf, o, sizeof(buf), "[INIT-WRAPPER] OK   ");
+        o = dp_push_str(buf, o, sizeof(buf), label);
+        o = dp_push_str(buf, o, sizeof(buf), " -> ");
+        o = dp_push_str(buf, o, sizeof(buf), path);
+        o = dp_push_str(buf, o, sizeof(buf), " (mode=");
+        o = dp_push_num(buf, o, sizeof(buf), (long)(st.st_mode & 0777), 8);
+        o = dp_push_str(buf, o, sizeof(buf), ", x=");
+        o = dp_push_num(buf, o, sizeof(buf), xok, 10);
+        o = dp_push_str(buf, o, sizeof(buf), ")");
     } else {
-        snprintf(buf, sizeof(buf), "[INIT-WRAPPER] MISS %-24s -> %s (errno=%d: %s)",
-                 label, path, errno, strerror(errno));
+        o = dp_push_str(buf, o, sizeof(buf), "[INIT-WRAPPER] MISS ");
+        o = dp_push_str(buf, o, sizeof(buf), label);
+        o = dp_push_str(buf, o, sizeof(buf), " -> ");
+        o = dp_push_str(buf, o, sizeof(buf), path);
+        o = dp_push_str(buf, o, sizeof(buf), " (errno=");
+        o = dp_push_num(buf, o, sizeof(buf), -r, 10);
+        o = dp_push_str(buf, o, sizeof(buf), ")");
     }
     write_line(buf);
 }
 
 static void ensure_byname_link(const char *name, const char *dev_a, const char *dev_b) {
-    const char *target = (access(dev_a, F_OK) == 0) ? dev_a : ((access(dev_b, F_OK) == 0) ? dev_b : NULL);
+    const char *target = (sc2(SYS_access, (long)dev_a, F_OK) == 0)
+                             ? dev_a
+                             : ((sc2(SYS_access, (long)dev_b, F_OK) == 0) ? dev_b : NULL);
     if (!target) return;
     char path[128];
-    snprintf(path, sizeof(path), "/dev/block/by-name/%s", name);
-    unlink(path);
-    if (symlink(target, path) != 0) {
-        (void)errno;
-    }
+    size_t o = 0;
+    o = dp_push_str(path, o, sizeof(path), "/dev/block/by-name/");
+    dp_push_str(path, o, sizeof(path), name);
+    sc1(SYS_unlink, (long)path);
+    sc2(SYS_symlink, (long)target, (long)path);
 }
 
 static void stream_kmsg_child(int kfd, int tty_fd) {
-    if (kfd < 0 || tty_fd < 0) _exit(0);
+    if (kfd < 0 || tty_fd < 0) sc1(SYS_exit, 0);
     int loops = 0;
     char buf[2048];
     while (loops < 18000) {
-        ssize_t n = read(kfd, buf, sizeof(buf) - 1);
+        long n = sc3(SYS_read, kfd, (long)buf, (long)(sizeof(buf) - 1));
         if (n > 0) {
             buf[n] = '\0';
-            char *semi = strchr(buf, ';');
-            char *msg = semi ? semi + 1 : buf;
-            if (strstr(msg, "[INITRD]") || strstr(msg, "[INIT-WRAPPER]")) continue;
-            size_t mlen = strlen(msg);
+            char *semi = dp_strchr(buf, ';');
+            char *msg = semi ? (semi + 1) : buf;
+            if (dp_strstr(msg, "[INITRD]") || dp_strstr(msg, "[INIT-WRAPPER]")) continue;
+            size_t mlen = dp_strlen(msg);
             safe_write_all(tty_fd, "[ANDROID/KMSG] ", 15);
             safe_write_all(tty_fd, msg, mlen);
             if (mlen == 0 || msg[mlen - 1] != '\n') {
@@ -532,42 +672,53 @@ static void stream_kmsg_child(int kfd, int tty_fd) {
             }
             continue;
         }
-        if (n < 0 && (errno == EPIPE || errno == EINTR)) {
-            usleep(1000);
+        long err = -n;
+        if (n < 0 && (err == EPIPE || err == EINTR)) {
+            dp_usleep(1000);
             loops++;
             continue;
         }
-        usleep(10000);
+        dp_usleep(10000);
         loops++;
     }
-    close(kfd);
-    close(tty_fd);
-    _exit(0);
+    sc1(SYS_close, kfd);
+    sc1(SYS_close, tty_fd);
+    sc1(SYS_exit, 0);
 }
 
-int main(int argc, char *argv[]) {
-    (void)argc;
-    int m_dev = 0;
-    if (access("/dev/ttyS0", F_OK) != 0) {
-        if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) != 0) m_dev = errno;
+int c_main(int argc, char **argv, char **envp) {
+    /* First heartbeat over inherited stdout/stderr before touching /dev */
+    safe_write_all(1, "[INIT-WRAPPER] _start alive (nostdlib)\n", 39);
+
+    long m_dev = 0;
+    if (sc2(SYS_access, (long)"/dev/ttyS0", F_OK) != 0) {
+        long mr = sc5(SYS_mount, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
+        if (mr < 0) m_dev = -mr;
     }
 
-    mkdir("/dev/block", 0755);
-    mkdir("/dev/block/by-name", 0755);
+    sc2(SYS_mkdir, (long)"/dev/block", 0755);
+    sc2(SYS_mkdir, (long)"/dev/block/by-name", 0755);
     ensure_byname_link("system", "/dev/block/vda", "/dev/vda");
     ensure_byname_link("vendor", "/dev/block/vdb", "/dev/vdb");
     ensure_byname_link("userdata", "/dev/block/vdc", "/dev/vdc");
     ensure_byname_link("data", "/dev/block/vdc", "/dev/vdc");
 
-    /* Non-blocking open avoids UART CLOCAL/DCD/tcdrain stalls on WHPX/QEMU 16550A */
-    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK);
-    if (g_tty < 0) g_tty = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
-    g_kmsg = open("/dev/kmsg", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+    g_tty = (int)sc3(SYS_open, (long)"/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK, 0);
+    if (g_tty < 0) g_tty = (int)sc3(SYS_open, (long)"/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK, 0);
+    if (g_tty < 0) g_tty = 1;
+    g_kmsg = (int)sc3(SYS_open, (long)"/dev/kmsg", O_WRONLY | O_NOCTTY | O_NONBLOCK, 0);
 
     char msg[256];
-    snprintf(msg, sizeof(msg),
-             "[INIT-WRAPPER] PID=%d entered /android rootfs (tty=%d, kmsg=%d, dev_err=%d)",
-             (int)getpid(), g_tty, g_kmsg, m_dev);
+    size_t o = 0;
+    o = dp_push_str(msg, o, sizeof(msg), "[INIT-WRAPPER] PID=");
+    o = dp_push_num(msg, o, sizeof(msg), sc0(SYS_getpid), 10);
+    o = dp_push_str(msg, o, sizeof(msg), " entered /android rootfs (tty=");
+    o = dp_push_num(msg, o, sizeof(msg), (long)g_tty, 10);
+    o = dp_push_str(msg, o, sizeof(msg), ", kmsg=");
+    o = dp_push_num(msg, o, sizeof(msg), (long)g_kmsg, 10);
+    o = dp_push_str(msg, o, sizeof(msg), ", dev_err=");
+    o = dp_push_num(msg, o, sizeof(msg), m_dev, 10);
+    dp_push_str(msg, o, sizeof(msg), ")");
     write_line(msg);
 
     check_path("/init", "/init");
@@ -581,29 +732,30 @@ int main(int argc, char *argv[]) {
     check_path("/linkerconfig", "/linkerconfig");
     check_path("/data/adb/ksud", "/data/adb/ksud");
 
-    if (access("/init", X_OK) != 0 || access("/system/bin/linker64", X_OK) != 0) {
+    if (sc2(SYS_access, (long)"/init", X_OK) != 0 || sc2(SYS_access, (long)"/system/bin/linker64", X_OK) != 0) {
         write_line("[INIT-WRAPPER] FATAL: /init or linker64 missing/not executable; stalling 25s for log flush...");
-        sleep(25);
+        dp_usleep(25000000L);
         return 1;
     }
 
-    int kmsg_read_fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+    int kmsg_read_fd = (int)sc3(SYS_open, (long)"/dev/kmsg", O_RDONLY | O_NONBLOCK, 0);
     if (kmsg_read_fd >= 0) {
-        lseek(kmsg_read_fd, 0, SEEK_END);
+        sc3(SYS_lseek, kmsg_read_fd, 0, SEEK_END);
     }
-    int child_tty = (g_tty >= 0) ? dup(g_tty) : dup(STDERR_FILENO);
+    int child_tty = (int)sc1(SYS_dup, g_tty);
+    if (child_tty < 0) child_tty = 1;
 
-    write_line("[INIT-WRAPPER] Handing off PID 1 via execv(\"/init\")...");
-    pid_t pid = fork();
+    write_line("[INIT-WRAPPER] Handing off PID 1 via execve(\"/init\")...");
+    long pid = sc0(SYS_fork);
     if (pid == 0) {
-        if (g_tty >= 0) close(g_tty);
-        if (g_kmsg >= 0) close(g_kmsg);
+        if (g_tty > 2) sc1(SYS_close, g_tty);
+        if (g_kmsg >= 0) sc1(SYS_close, g_kmsg);
         stream_kmsg_child(kmsg_read_fd, child_tty);
     }
-    if (kmsg_read_fd >= 0) close(kmsg_read_fd);
-    if (child_tty >= 0) close(child_tty);
-    if (g_tty >= 0) close(g_tty);
-    if (g_kmsg >= 0) close(g_kmsg);
+    if (kmsg_read_fd >= 0) sc1(SYS_close, kmsg_read_fd);
+    if (child_tty > 2) sc1(SYS_close, child_tty);
+    if (g_tty > 2) sc1(SYS_close, g_tty);
+    if (g_kmsg >= 0) sc1(SYS_close, g_kmsg);
 
     char *init_argv[16];
     init_argv[0] = "/init";
@@ -612,17 +764,35 @@ int main(int argc, char *argv[]) {
         init_argv[i] = argv[i];
     }
     init_argv[copy_cnt] = NULL;
-    execv("/init", init_argv);
+    long ex = sc3(SYS_execve, (long)"/init", (long)init_argv, (long)envp);
 
-    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK);
-    snprintf(msg, sizeof(msg), "[INIT-WRAPPER] FATAL: execv(\"/init\") failed errno=%d (%s); stalling 25s...", errno, strerror(errno));
+    g_tty = (int)sc3(SYS_open, (long)"/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK, 0);
+    if (g_tty < 0) g_tty = 1;
+    o = 0;
+    o = dp_push_str(msg, o, sizeof(msg), "[INIT-WRAPPER] FATAL: execve(\"/init\") failed errno=");
+    o = dp_push_num(msg, o, sizeof(msg), -ex, 10);
+    dp_push_str(msg, o, sizeof(msg), "; stalling 25s...");
     write_line(msg);
-    sleep(25);
+    dp_usleep(25000000L);
     return 1;
 }
+
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "  xor %rbp, %rbp\n"
+    "  mov (%rsp), %rdi\n"
+    "  lea 8(%rsp), %rsi\n"
+    "  lea 16(%rsp,%rdi,8), %rdx\n"
+    "  and $-16, %rsp\n"
+    "  call c_main\n"
+    "  mov %eax, %edi\n"
+    "  mov $60, %eax\n"
+    "  syscall\n"
+);
 CEOF
 
-gcc -static -Os -march=x86-64 -mtune=generic -Wall -Werror "${WORK_DIR}/droidport_init_wrapper.c" -o "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
+gcc -nostdlib -ffreestanding -fno-builtin -static -Os -march=x86-64 -mno-sse -mno-avx -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Werror "${WORK_DIR}/droidport_init_wrapper.c" -o "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
 chmod 0755 "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
 WRAP_INFO=$(file -b "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" || echo "unknown")
 echo "Verified PID-1 wrapper binary: ${WRAP_INFO}"
@@ -730,6 +900,7 @@ _dp_log() {
   fi
 }
 
+echo "7 7 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
 _dp_log "Kernel release: $(uname -r 2>/dev/null || echo unknown) | initrd flavor: $([ -x /sbin/ksud ] && echo ksunext || echo stock)"
 _dp_log "VirtIO block devices: $(ls -1 /dev/vd* 2>/dev/null | tr '\n' ' ' || echo none)"
 
@@ -738,8 +909,16 @@ TARGET_ROOT="/android"
 _dp_log "Preparing root target=${TARGET_ROOT} before switch_root"
 
 for SUB in dev proc sys mnt metadata apex linkerconfig tmp; do
-  [ -e "${TARGET_ROOT}/${SUB}" ] || mkdir -p "${TARGET_ROOT}/${SUB}" 2>/dev/null || true
+  if [ -L "${TARGET_ROOT}/${SUB}" ] || { [ -e "${TARGET_ROOT}/${SUB}" ] && [ ! -d "${TARGET_ROOT}/${SUB}" ]; }; then
+    rm -f "${TARGET_ROOT}/${SUB}" 2>/dev/null || true
+  fi
+  [ -d "${TARGET_ROOT}/${SUB}" ] || mkdir -p "${TARGET_ROOT}/${SUB}" 2>/dev/null || true
 done
+
+if [ -d "${TARGET_ROOT}/dev" ] && ! grep -q " ${TARGET_ROOT}/dev " /proc/mounts 2>/dev/null; then
+  mount -t devtmpfs devtmpfs "${TARGET_ROOT}/dev" 2>/dev/null || true
+fi
+_dp_log "Pre-switch dev nodes: ttyS0=$([ -c "${TARGET_ROOT}/dev/ttyS0" ] && echo ok || echo miss), kmsg=$([ -c "${TARGET_ROOT}/dev/kmsg" ] && echo ok || echo miss)"
 
 if [ -d "${TARGET_ROOT}/metadata" ] && ! grep -q " ${TARGET_ROOT}/metadata " /proc/mounts 2>/dev/null; then
   mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs "${TARGET_ROOT}/metadata" 2>/dev/null || true
@@ -829,13 +1008,26 @@ sr_re = re.compile(
 for i, line in enumerate(lines):
     if not header_logged and i == 0 and line.startswith("#!"):
         out.append(line)
+        out.append('echo 7 7 1 7 > /proc/sys/kernel/printk 2>/dev/null || true\n')
         out.append('echo "[INITRD] Bliss/Android-x86 /init started (cmd=$(cat /proc/cmdline 2>/dev/null))" >/dev/ttyS0 2>/dev/null || true\n')
         header_logged = True
+        continue
+
+    if "0 0 0 0" in line and "/proc/sys/kernel/printk" in line and not line.lstrip().startswith("#"):
+        indent = re.match(r'^(\s*)', line).group(1)
+        out.append(f'{indent}echo 7 7 1 7 > /proc/sys/kernel/printk 2>/dev/null || true\n')
+        continue
+
+    if re.search(r'^\s*LOG=/dev/null\s*$', line):
+        indent = re.match(r'^(\s*)', line).group(1)
+        out.append(f'{indent}if [ -c /dev/ttyS0 ]; then LOG=/dev/ttyS0; else LOG=/dev/null; fi\n')
         continue
 
     if re.search(r'\bswitch_root\b', line) and not line.lstrip().startswith("#"):
         indent = re.match(r'^(\s*)', line).group(1)
         out.append(f'{indent}[ -x /sbin/droidport_mount_hook.sh ] && /sbin/droidport_mount_hook.sh\n')
+        out.append(f'{indent}echo 7 7 1 7 > /proc/sys/kernel/printk 2>/dev/null || true\n')
+        out.append(f'{indent}[ -c /dev/ttyS0 ] && exec >/dev/ttyS0 2>&1\n')
         m = sr_re.match(line.rstrip("\r\n"))
         if m:
             lead, prefix, sr_cmd, tgt, init_arg, rest = m.groups()

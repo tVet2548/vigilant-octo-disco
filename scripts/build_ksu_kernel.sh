@@ -416,17 +416,62 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     --enable CONFIG_SQUASHFS \
     --set-val CONFIG_PANIC_TIMEOUT 0 || true
 
-  # Disable only heavy physical GPU drivers right before olddefconfig (keeps fast CI build)
-  ./scripts/config --disable CONFIG_DRM_I915 --disable CONFIG_DRM_AMDGPU --disable CONFIG_DRM_NOUVEAU --disable CONFIG_DRM_RADEON || true
+  # Enforce baseline x86-64 CPU (no AVX2/v3), GZIP bzImage, and disable Clang LTO/CFI/IBT/TDX/SEV quirks
+  ./scripts/config \
+    --enable CONFIG_GENERIC_CPU \
+    --enable CONFIG_RELOCATABLE \
+    --enable CONFIG_KERNEL_GZIP \
+    --disable CONFIG_KERNEL_XZ \
+    --disable CONFIG_KERNEL_ZSTD \
+    --disable CONFIG_KERNEL_LZ4 \
+    --disable CONFIG_KERNEL_LZMA \
+    --disable CONFIG_KERNEL_BZIP2 \
+    --disable CONFIG_KERNEL_LZO \
+    --disable CONFIG_MK8 \
+    --disable CONFIG_MPSC \
+    --disable CONFIG_MCORE2 \
+    --disable CONFIG_MATOM \
+    --disable CONFIG_MNATIVE_INTEL \
+    --disable CONFIG_MNATIVE_AMD \
+    --disable CONFIG_X86_KERNEL_IBT \
+    --disable CONFIG_CFI_CLANG \
+    --disable CONFIG_LTO_CLANG_THIN \
+    --disable CONFIG_LTO_CLANG_FULL \
+    --disable CONFIG_AMD_MEM_ENCRYPT \
+    --disable CONFIG_INTEL_TDX_GUEST \
+    --disable CONFIG_KASAN \
+    --disable CONFIG_UBSAN \
+    --disable CONFIG_CMDLINE_BOOL \
+    --disable CONFIG_CMDLINE_OVERRIDE \
+    --disable CONFIG_RETHUNK \
+    --disable CONFIG_MITIGATION_RETHUNK \
+    --disable CONFIG_SLS \
+    --disable CONFIG_MITIGATION_SLS \
+    --disable CONFIG_CALL_DEPTH_TRACKING \
+    --disable CONFIG_FINEIBT \
+    --disable CONFIG_GCC_PLUGINS \
+    --disable CONFIG_GCOV_KERNEL \
+    --disable CONFIG_KCSAN \
+    --disable CONFIG_KFENCE \
+    --disable CONFIG_DEBUG_VIRTUAL \
+    --disable CONFIG_DRM_I915 \
+    --disable CONFIG_DRM_AMDGPU \
+    --disable CONFIG_DRM_NOUVEAU \
+    --disable CONFIG_DRM_RADEON || true
 
   yes "" | make ARCH=x86_64 olddefconfig >/dev/null 2>&1 || make ARCH=x86_64 olddefconfig
   echo "Verified critical kernel symbols before compilation:"
-  grep -E 'CONFIG_(KSU|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|X86_5LEVEL|BPF_SYSCALL|CGROUP_BPF|PSI|CGROUPS|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|MAC80211_HWSIM|VIRT_WIFI)' .config | head -n 65 || true
+  grep -E 'CONFIG_(KSU|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|X86_5LEVEL|GENERIC_CPU|MNATIVE|KERNEL_GZIP|X86_KERNEL_IBT|BPF_SYSCALL|CGROUP_BPF|PSI|CGROUPS|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|DEVTMPFS|MAC80211_HWSIM|VIRT_WIFI|RETHUNK|SLS|CMDLINE_BOOL)' .config | head -n 90 || true
   grep -q '^CONFIG_KSU=y' .config
   grep -q '^CONFIG_OVERLAY_FS=y' .config
   grep -q '^CONFIG_VIRTIO_BLK=y' .config
   grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' .config
   grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
+  grep -q '^CONFIG_DEVTMPFS=y' .config
+  grep -q '^CONFIG_DEVTMPFS_MOUNT=y' .config
+  grep -q '^CONFIG_TMPFS=y' .config
+  grep -q '^CONFIG_ANDROID_BINDER_IPC=y' .config
+  grep -q '^CONFIG_GENERIC_CPU=y' .config
 
   BUILD_LOG="${WORK_DIR}/kernel_build.log"
   if ! make ARCH=x86_64 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "${BUILD_LOG}"; then

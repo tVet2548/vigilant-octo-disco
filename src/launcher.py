@@ -1043,9 +1043,10 @@ class PortableAndroidLauncher(BaseCTk):
                     or "booting linux" in low
                     or "kernel panic" in low
                     or "init:" in low
+                    or "[initrd]" in low
                     or "[init-wrapper]" in low
                     or "[android/kmsg]" in low
-                    or "android" in low
+                    or "detecting android-x86" in low
                 ):
                     boot_state["kernel_seen"] = True
                 boot_state["last_serial_ts"] = time.time()
@@ -1415,8 +1416,10 @@ class PortableAndroidLauncher(BaseCTk):
             "booting linux",
             "earlycon:",
             "[    0.",
-            "init:",
-            "android",
+            "[initrd]",
+            "[init-wrapper]",
+            "[android/kmsg]",
+            "detecting android-x86",
         )
 
         try:
@@ -1507,8 +1510,8 @@ class PortableAndroidLauncher(BaseCTk):
                 tailer_thread.start()
 
                 has_next_tier = idx < len(cascade) - 1
-                prekernel_secs = 22.0 if tier_id.startswith("tcg") else 18.0
-                stall_secs = 120.0 if tier_id.startswith("tcg") else 75.0
+                prekernel_secs = 28.0 if tier_id.startswith("tcg") else 18.0
+                stall_secs = 150.0 if tier_id.startswith("tcg") else 110.0
 
                 def _watchdog(
                     p: subprocess.Popen = proc,
@@ -1686,9 +1689,14 @@ class PortableAndroidLauncher(BaseCTk):
 
             pre_kernel_failed = (
                 not self.stop_log_threads.is_set()
+                and not self.adb_connected
                 and not boot_state["kernel_seen"]
-                and (boot_state["killed_by_watchdog"] or (rc != 0 and elapsed < 25.0))
+                and (boot_state["killed_by_watchdog"] or elapsed < 45.0)
             )
+            if pre_kernel_failed and not boot_state["killed_by_watchdog"]:
+                console_log(
+                    f"[PRE-KERNEL/FAULT] {tier_id} ({tier_kernel}) exited before Linux earlycon (elapsed={elapsed:.1f}s, rc={rc}, 0 kernel lines) -> triggering pre-kernel diagnostic."
+                )
 
             if pre_kernel_failed and not diag_captured and (tier_id.startswith("tcg") or idx == len(cascade) - 1 or (idx + 1 < len(cascade) and cascade[idx + 1][2] != tier_kernel)):
                 diag_captured = True
@@ -1697,7 +1705,12 @@ class PortableAndroidLauncher(BaseCTk):
             early_boot_failed = (
                 not self.stop_log_threads.is_set()
                 and not self.adb_connected
-                and (boot_state["killed_by_watchdog"] or guest_reboot_stopped or (rc != 0 and elapsed < 60.0))
+                and (
+                    boot_state["killed_by_watchdog"]
+                    or guest_reboot_stopped
+                    or pre_kernel_failed
+                    or (rc != 0 and elapsed < 60.0)
+                )
             )
             has_next = idx < len(cascade) - 1
             if has_next and early_boot_failed:
