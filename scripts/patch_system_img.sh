@@ -35,8 +35,11 @@ fi
 
 if [ -z "${GSI_URL}" ]; then
   # 2) Check GitHub Treble/GSI releases strictly matching non-Waydroid Android 13 x86_64 GApps
+  GH_TOK="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  GH_CURL_ARGS=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+  [ -n "${GH_TOK}" ] && GH_CURL_ARGS+=(-H "Authorization: Bearer ${GH_TOK}")
   for REPO in "AndyYan/lineage_build_config" "MisterZtr/LineageOS_gsi" "TrebleDroid/treble_experimentations"; do
-    CANDIDATE=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=15" 2>/dev/null | \
+    CANDIDATE=$(curl -fsSL "${GH_CURL_ARGS[@]}" "https://api.github.com/repos/${REPO}/releases?per_page=15" 2>/dev/null | \
       jq -r '.[].assets[] | select((.name | test("(lineage[-_]?20|android[-_]?13)"; "i")) and (.name | test("x86_64"; "i")) and (.name | test("(bgN|bgS|gapps)"; "i")) and (.name | test("(arm64|a64|arm32|bvN|bvS|vanilla|waydroid)"; "i") | not) and (.name | test("\\.(img\\.xz|img\\.gz|zip|7z|img)$"; "i"))) | .browser_download_url' | head -n1 || true)
     if [ -n "${CANDIDATE}" ] && [ "${CANDIDATE}" != "null" ]; then
       GSI_URL="${CANDIDATE}"

@@ -190,8 +190,18 @@ if [ -s "${KSU_APK}" ]; then
 fi
 
 if [ ! -s "/tmp/ksud_x86_64" ]; then
-  KSUD_URL=$(curl -fsSL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | \
+  GH_TOK="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  GH_CURL_ARGS=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+  [ -n "${GH_TOK}" ] && GH_CURL_ARGS+=(-H "Authorization: Bearer ${GH_TOK}")
+  KSUD_URL=$(curl -fsSL "${GH_CURL_ARGS[@]}" "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | \
     jq -r '.assets[] | select(.name | test("ksud.*(x86_64|x64)"; "i")) | .browser_download_url' | head -n1 || true)
+  if [ -z "${KSUD_URL}" ] || [ "${KSUD_URL}" = "null" ]; then
+    KSU_REL_TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | awk -F/ '{print $NF}' || true)
+    if [ -n "${KSU_REL_TAG}" ] && [ "${KSU_REL_TAG}" != "latest" ]; then
+      KSUD_REL=$(curl -fsSL "https://github.com/KernelSU-Next/KernelSU-Next/releases/expanded_assets/${KSU_REL_TAG}" 2>/dev/null | grep -oE '/KernelSU-Next/KernelSU-Next/releases/download/[^"<> ]*ksud[^"<> ]*(x86_64|x64)[^"<> ]*' | head -n1 || true)
+      [ -n "${KSUD_REL}" ] && KSUD_URL="https://github.com${KSUD_REL}"
+    fi
+  fi
   if [ -n "${KSUD_URL}" ] && [ "${KSUD_URL}" != "null" ]; then
     echo "Downloading x86_64 ksud release asset: ${KSUD_URL}"
     curl -fSL --retry 3 -o "/tmp/ksud_x86_64" "${KSUD_URL}" || rm -f "/tmp/ksud_x86_64"
@@ -252,9 +262,18 @@ PYEOF
 
   cd "${KERNEL_SRC}"
 
-  KSU_TAG=$(curl -fsSL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' || true)
+  GH_TOK="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  GH_CURL_ARGS=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+  [ -n "${GH_TOK}" ] && GH_CURL_ARGS+=(-H "Authorization: Bearer ${GH_TOK}")
+  KSU_TAG=$(curl -fsSL "${GH_CURL_ARGS[@]}" "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' || true)
   if [ -z "${KSU_TAG}" ] || [ "${KSU_TAG}" = "null" ]; then
-    KSU_TAG=$(curl -fsSL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags?per_page=10" 2>/dev/null | jq -r '[.[] | select(.name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].name // empty' || true)
+    KSU_TAG=$(curl -fsSL "${GH_CURL_ARGS[@]}" "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags?per_page=10" 2>/dev/null | jq -r '[.[] | select(.name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].name // empty' || true)
+  fi
+  if [ -z "${KSU_TAG}" ] || [ "${KSU_TAG}" = "null" ]; then
+    KSU_EFF=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/KernelSU-Next/KernelSU-Next/releases/latest" 2>/dev/null | awk -F/ '{print $NF}' || true)
+    if [ -n "${KSU_EFF}" ] && [ "${KSU_EFF}" != "latest" ] && [ "${KSU_EFF}" != "releases" ]; then
+      KSU_TAG="${KSU_EFF}"
+    fi
   fi
   KSU_REF="${KSU_TAG:-legacy}"
   echo "Integrating stable KernelSU-Next ref '${KSU_REF}' (NO SUSFS)..."

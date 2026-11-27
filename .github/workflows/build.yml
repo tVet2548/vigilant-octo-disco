@@ -129,6 +129,9 @@ jobs:
 
       - name: 5. Fetch QEMU (WHPX + VirGL + ANGLE), scrcpy, ADB & Spoof Modules
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "${BUNDLE_DIR}/bin/scrcpy" "${BUNDLE_DIR}/images/profiles" "${BUNDLE_DIR}/modules" "${BUNDLE_DIR}/assets"
           cp -f assets/app.ico "${BUNDLE_DIR}/assets/app.ico"
@@ -139,6 +142,8 @@ jobs:
       - name: 6. Extract Bliss OS 16.9 (API 33) Base, x86_64 ksud & Build Matched KernelSU Next (ikconfig)
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           BLISS_ISO_URL: ${{ github.event.inputs.bliss_iso_url }}
           KSU_KERNEL_URL: ${{ github.event.inputs.ksu_kernel_url }}
         run: |
@@ -149,6 +154,8 @@ jobs:
       - name: 7. Patch LineageOS 20.0 GApps (API 33), Build Dual Initrd & Pre-Format 16GB ext4 Data
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           LINEAGE_GSI_URL: ${{ github.event.inputs.lineage_gsi_url }}
         run: |
           chmod +x scripts/patch_system_img.sh
