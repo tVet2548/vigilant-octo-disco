@@ -1,0 +1,17 @@
+# Node / Web preview artifacts
+node_modules/
+dist/
+.vite/
+
+# Python / PyInstaller artifacts
+__pycache__/
+*.py[cod]
+build/
+*.spec
+
+# Build bundle & runtime state
+dist_bundle/
+last_boot.log
+launcher_config.json
+.DS_Store
+Thumbs.db

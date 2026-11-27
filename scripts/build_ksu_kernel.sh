@@ -52,6 +52,16 @@ cp -f "${WORK_DIR}/iso_mnt/initrd.img" "/tmp/base_initrd.img"
 RAW_VENDOR="${WORK_DIR}/vendor_raw.img"
 if [ -f "${WORK_DIR}/iso_mnt/vendor.img" ]; then
   cp -f "${WORK_DIR}/iso_mnt/vendor.img" "${RAW_VENDOR}"
+elif [ -f "${WORK_DIR}/iso_mnt/vendor.efs" ]; then
+  mkdir -p "${WORK_DIR}/vefs_mnt"
+  mount -t erofs -o loop,ro "${WORK_DIR}/iso_mnt/vendor.efs" "${WORK_DIR}/vefs_mnt"
+  if [ -f "${WORK_DIR}/vefs_mnt/vendor.img" ]; then
+    cp -f "${WORK_DIR}/vefs_mnt/vendor.img" "${RAW_VENDOR}"
+  fi
+  umount "${WORK_DIR}/vefs_mnt"
+elif [ -f "${WORK_DIR}/iso_mnt/vendor.sfs" ]; then
+  unsquashfs -d "${WORK_DIR}/vsfs_out" "${WORK_DIR}/iso_mnt/vendor.sfs" "vendor.img" || true
+  [ -f "${WORK_DIR}/vsfs_out/vendor.img" ] && mv "${WORK_DIR}/vsfs_out/vendor.img" "${RAW_VENDOR}"
 fi
 
 if [ -f "${WORK_DIR}/iso_mnt/system.efs" ]; then
@@ -414,6 +424,9 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
   grep -E 'CONFIG_(KSU|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|X86_5LEVEL|BPF_SYSCALL|CGROUP_BPF|PSI|CGROUPS|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|MAC80211_HWSIM|VIRT_WIFI)' .config | head -n 65 || true
   grep -q '^CONFIG_KSU=y' .config
   grep -q '^CONFIG_OVERLAY_FS=y' .config
+  grep -q '^CONFIG_VIRTIO_BLK=y' .config
+  grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' .config
+  grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
 
   BUILD_LOG="${WORK_DIR}/kernel_build.log"
   if ! make ARCH=x86_64 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "${BUILD_LOG}"; then

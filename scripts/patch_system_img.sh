@@ -260,9 +260,9 @@ if [ -s "${IMG_DIR}/vendor.img" ]; then
   fi
 fi
 
-# Bridge Bliss x86_64 fstab & hardware init scripts
+# Bridge Bliss x86_64 fstab & hardware init scripts (no nomblk_io_submit on Linux 6.1 ext4)
 FSTAB_CONTENT='# VirtIO Portable Android 13 (API 33) fstab (bridged for Bliss initrd pre-mounts)
-/dev/block/vdc /data ext4 noatime,nosuid,nodev,nomblk_io_submit,errors=panic wait,latemount
+/dev/block/vdc /data ext4 noatime,nosuid,nodev,errors=remount-ro wait,latemount
 '
 mkdir -p "${SYS_ROOT}/etc/init/hw" "${WORK_DIR}/mnt/first_stage_ramdisk"
 printf '%s' "${FSTAB_CONTENT}" > "${WORK_DIR}/mnt/fstab.android_x86_64"
@@ -338,9 +338,13 @@ EOF
       for SE_CAND in \
         "${WORK_DIR}/mnt/system_ext/etc/selinux/system_ext_sepolicy.cil" \
         "${SYS_ROOT}/system_ext/etc/selinux/system_ext_sepolicy.cil" \
+        "${WORK_DIR}/mnt/system_ext/etc/selinux/mapping/${PLAT_VER}.cil" \
+        "${SYS_ROOT}/system_ext/etc/selinux/mapping/${PLAT_VER}.cil" \
         "${WORK_DIR}/mnt/product/etc/selinux/product_sepolicy.cil" \
-        "${SYS_ROOT}/product/etc/selinux/product_sepolicy.cil"; do
-        [ -f "${SE_CAND}" ] && CIL_LIST+=("${SE_CAND}")
+        "${SYS_ROOT}/product/etc/selinux/product_sepolicy.cil" \
+        "${WORK_DIR}/mnt/product/etc/selinux/mapping/${PLAT_VER}.cil" \
+        "${SYS_ROOT}/product/etc/selinux/mapping/${PLAT_VER}.cil"; do
+        [ -n "${PLAT_VER}" ] && [ -f "${SE_CAND}" ] && CIL_LIST+=("${SE_CAND}")
       done
       [ -f "${VEN_SE_DIR}/plat_pub_versioned.cil" ] && CIL_LIST+=("${VEN_SE_DIR}/plat_pub_versioned.cil")
       [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ] && CIL_LIST+=("${VEN_SE_DIR}/vendor_sepolicy.cil")
@@ -351,47 +355,94 @@ EOF
           echo "Verified SELinux CIL compilation succeeded cleanly!"
           rm -f "${WORK_DIR}/test_policy"
         else
-          echo "WARNING: secilc -m failed on mixed LineageOS 20 + Bliss 16.9 CIL files:"
+          echo "WARNING: secilc -m reported issues on mixed LineageOS 20 + Bliss 16.9 CIL files:"
           head -n 25 "${WORK_DIR}/secilc.err" || true
-          SYS_ONLY_OK=0
-          if secilc -m -M true -G -N -c 30 \
-            "${SYS_SE_DIR}/plat_sepolicy.cil" \
-            $([ -n "${PLAT_VER}" ] && [ -f "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil" ] && echo "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil") \
-            -o "${WORK_DIR}/test_sys_policy" -f /dev/null 2>"${WORK_DIR}/secilc_sys.err"; then
-            SYS_ONLY_OK=1
-            rm -f "${WORK_DIR}/test_sys_policy"
-          fi
+          echo "Running intelligent CIL conflict healer (deduplicating conflicting symbols while preserving vendor types)..."
+          python3 - "${VEN_SE_DIR}" "${WORK_DIR}/secilc.err" "${SYS_SE_DIR}" "${PLAT_VER}" "${WORK_DIR}/mnt" "${SYS_ROOT}" <<'CILPY'
+import pathlib, re, subprocess, sys
 
-          if [ "${SYS_ONLY_OK}" -eq 1 ]; then
-            echo "Aligning conflicting vendor_sepolicy.cil & plat_pub_versioned.cil to prevent Android SetupSelinux FatalReboot..."
-            if [ -f "${VEN_SE_DIR}/vendor_sepolicy.cil" ]; then
-              mv -f "${VEN_SE_DIR}/vendor_sepolicy.cil" "${VEN_SE_DIR}/vendor_sepolicy.cil.orig"
-              : > "${VEN_SE_DIR}/vendor_sepolicy.cil"
-            fi
-            if [ -f "${VEN_SE_DIR}/plat_pub_versioned.cil" ]; then
-              mv -f "${VEN_SE_DIR}/plat_pub_versioned.cil" "${VEN_SE_DIR}/plat_pub_versioned.cil.orig"
-              : > "${VEN_SE_DIR}/plat_pub_versioned.cil"
-            fi
-            if secilc -m -M true -G -N -c 30 \
-              "${SYS_SE_DIR}/plat_sepolicy.cil" \
-              $([ -n "${PLAT_VER}" ] && [ -f "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil" ] && echo "${SYS_SE_DIR}/mapping/${PLAT_VER}.cil") \
-              "${VEN_SE_DIR}/vendor_sepolicy.cil" \
-              -o "${WORK_DIR}/test_policy" -f /dev/null 2>"${WORK_DIR}/secilc_retry.err"; then
-              echo "Reconciled SELinux CIL graph compiled cleanly!"
-              rm -f "${WORK_DIR}/test_policy"
-            else
-              cat "${WORK_DIR}/secilc_retry.err" || true
-            fi
-          else
-            echo "Note: Host secilc differs from Android on-device secilc; preserving Bliss 16.9 vendor CILs intact."
-          fi
+ven_dir = pathlib.Path(sys.argv[1])
+err_file = pathlib.Path(sys.argv[2])
+sys_se_dir = pathlib.Path(sys.argv[3])
+plat_ver = sys.argv[4]
+mnt_root = pathlib.Path(sys.argv[5])
+sys_root = pathlib.Path(sys.argv[6])
+
+cil_files = []
+for cand in [
+    sys_se_dir / "plat_sepolicy.cil",
+    sys_se_dir / "mapping" / f"{plat_ver}.cil" if plat_ver else None,
+    sys_se_dir / "mapping" / f"{plat_ver}.compat.cil" if plat_ver else None,
+    mnt_root / "system_ext/etc/selinux/system_ext_sepolicy.cil",
+    sys_root / "system_ext/etc/selinux/system_ext_sepolicy.cil",
+    mnt_root / f"system_ext/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    sys_root / f"system_ext/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    mnt_root / "product/etc/selinux/product_sepolicy.cil",
+    sys_root / "product/etc/selinux/product_sepolicy.cil",
+    mnt_root / f"product/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    sys_root / f"product/etc/selinux/mapping/{plat_ver}.cil" if plat_ver else None,
+    ven_dir / "plat_pub_versioned.cil",
+    ven_dir / "vendor_sepolicy.cil",
+]:
+    if cand and cand.is_file() and str(cand) not in cil_files:
+        cil_files.append(str(cand))
+
+ven_targets = [p for p in (ven_dir / "plat_pub_versioned.cil", ven_dir / "vendor_sepolicy.cil") if p.is_file()]
+
+def comment_line(path: pathlib.Path, line_no: int) -> bool:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and not lines[idx].lstrip().startswith(";"):
+        # Only comment standalone single-line statements cleanly; for multi-line blocks, balance parens
+        depth = lines[idx].count("(") - lines[idx].count(")")
+        end = idx
+        while depth > 0 and end + 1 < len(lines):
+            end += 1
+            depth += lines[end].count("(") - lines[end].count(")")
+        for j in range(idx, end + 1):
+            if not lines[j].lstrip().startswith(";"):
+                lines[j] = "; healed: " + lines[j]
+        path.write_text("".join(lines), encoding="utf-8")
+        return True
+    return False
+
+for attempt in range(25):
+    proc = subprocess.run(
+        ["secilc", "-m", "-M", "true", "-G", "-N", "-c", "30", *cil_files, "-o", "/tmp/healed_policy.bin", "-f", "/dev/null"],
+        capture_output=True, text=True
+    )
+    if proc.returncode == 0:
+        print(f"SELinux CIL healed cleanly after {attempt} iteration(s)!")
+        pathlib.Path("/tmp/healed_policy.bin").unlink(missing_ok=True)
+        sys.exit(0)
+    err_txt = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    changed = False
+    for m in re.finditer(r"([^\s:]+\.cil):(\d+):", err_txt):
+        fpath = pathlib.Path(m.group(1))
+        lno = int(m.group(2))
+        if fpath in ven_targets:
+            if comment_line(fpath, lno):
+                changed = True
+                break
+    if not changed:
+        # Handle 'Duplicate declaration' where first/second location is on vendor CIL
+        dup = re.search(r"(?:Duplicate|Multiple) declaration.*?at ([^\s:]+\.cil):(\d+)", err_txt, re.S)
+        if dup:
+            fpath = pathlib.Path(dup.group(1))
+            lno = int(dup.group(2))
+            if fpath in ven_targets and comment_line(fpath, lno):
+                changed = True
+    if not changed:
+        print("CIL healer could not isolate further lines; preserving vendor CILs.")
+        break
+CILPY
         fi
       fi
     fi
   fi
 fi
 
-# Compile static C PID-1 /init diagnostic wrapper & kmsg->ttyS0 streamer
+# Compile static C PID-1 /init diagnostic wrapper & non-blocking kmsg->ttyS0 streamer
 echo "Compiling static PID-1 /init wrapper (/sbin/droidport_init_wrapper)..."
 cat <<'CEOF' > "${WORK_DIR}/droidport_init_wrapper.c"
 #define _GNU_SOURCE
@@ -401,27 +452,39 @@ cat <<'CEOF' > "${WORK_DIR}/droidport_init_wrapper.c"
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <termios.h>
 #include <unistd.h>
 
 static int g_tty = -1;
 static int g_kmsg = -1;
 
+static void safe_write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    int retries = 0;
+    while (off < len && retries < 200) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n > 0) {
+            off += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            usleep(1000);
+            retries++;
+            continue;
+        }
+        break;
+    }
+}
+
 static void write_line(const char *msg) {
     size_t len = strlen(msg);
-    if (g_tty >= 0) {
-        ssize_t unused = write(g_tty, msg, len);
-        (void)unused;
-        unused = write(g_tty, "\n", 1);
-        (void)unused;
-        tcdrain(g_tty);
-    }
+    int out_fd = (g_tty >= 0) ? g_tty : STDERR_FILENO;
+    safe_write_all(out_fd, msg, len);
+    safe_write_all(out_fd, "\n", 1);
     if (g_kmsg >= 0) {
         char kbuf[512];
         int n = snprintf(kbuf, sizeof(kbuf), "<6>%s\n", msg);
         if (n > 0) {
-            ssize_t unused = write(g_kmsg, kbuf, (size_t)n);
-            (void)unused;
+            safe_write_all(g_kmsg, kbuf, (size_t)n);
         }
     }
 }
@@ -439,75 +502,72 @@ static void check_path(const char *label, const char *path) {
     write_line(buf);
 }
 
-static void ensure_byname_link(const char *name, const char *target) {
+static void ensure_byname_link(const char *name, const char *dev_a, const char *dev_b) {
+    const char *target = (access(dev_a, F_OK) == 0) ? dev_a : ((access(dev_b, F_OK) == 0) ? dev_b : NULL);
+    if (!target) return;
     char path[128];
-    if (access(target, F_OK) == 0) {
-        snprintf(path, sizeof(path), "/dev/block/by-name/%s", name);
-        unlink(path);
-        if (symlink(target, path) != 0) {
-            (void)errno;
-        }
+    snprintf(path, sizeof(path), "/dev/block/by-name/%s", name);
+    unlink(path);
+    if (symlink(target, path) != 0) {
+        (void)errno;
     }
 }
 
-static void stream_kmsg_child(void) {
-    int kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
-    if (kfd < 0) _exit(0);
-    lseek(kfd, 0, SEEK_END);
+static void stream_kmsg_child(int kfd, int tty_fd) {
+    if (kfd < 0 || tty_fd < 0) _exit(0);
     int loops = 0;
     char buf[2048];
-    while (loops < 9000) {
+    while (loops < 18000) {
         ssize_t n = read(kfd, buf, sizeof(buf) - 1);
         if (n > 0) {
             buf[n] = '\0';
             char *semi = strchr(buf, ';');
             char *msg = semi ? semi + 1 : buf;
             if (strstr(msg, "[INITRD]") || strstr(msg, "[INIT-WRAPPER]")) continue;
-            if (g_tty >= 0) {
-                size_t mlen = strlen(msg);
-                ssize_t u1 = write(g_tty, "[ANDROID/KMSG] ", 15);
-                ssize_t u2 = write(g_tty, msg, mlen);
-                (void)u1; (void)u2;
-                if (mlen == 0 || msg[mlen - 1] != '\n') {
-                    ssize_t u3 = write(g_tty, "\n", 1);
-                    (void)u3;
-                }
-                tcdrain(g_tty);
+            size_t mlen = strlen(msg);
+            safe_write_all(tty_fd, "[ANDROID/KMSG] ", 15);
+            safe_write_all(tty_fd, msg, mlen);
+            if (mlen == 0 || msg[mlen - 1] != '\n') {
+                safe_write_all(tty_fd, "\n", 1);
             }
+            continue;
+        }
+        if (n < 0 && (errno == EPIPE || errno == EINTR)) {
+            usleep(1000);
+            loops++;
             continue;
         }
         usleep(10000);
         loops++;
     }
     close(kfd);
+    close(tty_fd);
     _exit(0);
 }
 
 int main(int argc, char *argv[]) {
     (void)argc;
+    int m_dev = 0;
     if (access("/dev/ttyS0", F_OK) != 0) {
-        mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
-    }
-    if (access("/proc/cmdline", F_OK) != 0) {
-        mount("proc", "/proc", "proc", 0, NULL);
-    }
-    if (access("/sys/kernel", F_OK) != 0) {
-        mount("sysfs", "/sys", "sysfs", 0, NULL);
+        if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) != 0) m_dev = errno;
     }
 
     mkdir("/dev/block", 0755);
     mkdir("/dev/block/by-name", 0755);
-    ensure_byname_link("system", "/dev/block/vda");
-    ensure_byname_link("vendor", "/dev/block/vdb");
-    ensure_byname_link("userdata", "/dev/block/vdc");
-    ensure_byname_link("data", "/dev/block/vdc");
+    ensure_byname_link("system", "/dev/block/vda", "/dev/vda");
+    ensure_byname_link("vendor", "/dev/block/vdb", "/dev/vdb");
+    ensure_byname_link("userdata", "/dev/block/vdc", "/dev/vdc");
+    ensure_byname_link("data", "/dev/block/vdc", "/dev/vdc");
 
-    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_SYNC);
-    if (g_tty < 0) g_tty = open("/dev/console", O_WRONLY | O_NOCTTY | O_SYNC);
-    g_kmsg = open("/dev/kmsg", O_WRONLY | O_NOCTTY);
+    /* Non-blocking open avoids UART CLOCAL/DCD/tcdrain stalls on WHPX/QEMU 16550A */
+    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+    if (g_tty < 0) g_tty = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+    g_kmsg = open("/dev/kmsg", O_WRONLY | O_NOCTTY | O_NONBLOCK);
 
     char msg[256];
-    snprintf(msg, sizeof(msg), "[INIT-WRAPPER] PID=%d entered /android rootfs; validating boot prerequisites...", (int)getpid());
+    snprintf(msg, sizeof(msg),
+             "[INIT-WRAPPER] PID=%d entered /android rootfs (tty=%d, kmsg=%d, dev_err=%d)",
+             (int)getpid(), g_tty, g_kmsg, m_dev);
     write_line(msg);
 
     check_path("/init", "/init");
@@ -527,21 +587,34 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        stream_kmsg_child();
+    int kmsg_read_fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+    if (kmsg_read_fd >= 0) {
+        lseek(kmsg_read_fd, 0, SEEK_END);
     }
-    usleep(60000);
+    int child_tty = (g_tty >= 0) ? dup(g_tty) : dup(STDERR_FILENO);
 
     write_line("[INIT-WRAPPER] Handing off PID 1 via execv(\"/init\")...");
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (g_tty >= 0) close(g_tty);
+        if (g_kmsg >= 0) close(g_kmsg);
+        stream_kmsg_child(kmsg_read_fd, child_tty);
+    }
+    if (kmsg_read_fd >= 0) close(kmsg_read_fd);
+    if (child_tty >= 0) close(child_tty);
     if (g_tty >= 0) close(g_tty);
     if (g_kmsg >= 0) close(g_kmsg);
 
-    char *init_argv[] = {"/init", NULL};
-    (void)argv;
+    char *init_argv[16];
+    init_argv[0] = "/init";
+    int copy_cnt = (argc > 1) ? ((argc < 15) ? argc : 15) : 1;
+    for (int i = 1; i < copy_cnt; i++) {
+        init_argv[i] = argv[i];
+    }
+    init_argv[copy_cnt] = NULL;
     execv("/init", init_argv);
 
-    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_SYNC);
+    g_tty = open("/dev/ttyS0", O_WRONLY | O_NOCTTY | O_NONBLOCK);
     snprintf(msg, sizeof(msg), "[INIT-WRAPPER] FATAL: execv(\"/init\") failed errno=%d (%s); stalling 25s...", errno, strerror(errno));
     write_line(msg);
     sleep(25);
@@ -549,7 +622,7 @@ int main(int argc, char *argv[]) {
 }
 CEOF
 
-gcc -static -Os -Wall -Werror "${WORK_DIR}/droidport_init_wrapper.c" -o "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
+gcc -static -Os -march=x86-64 -mtune=generic -Wall -Werror "${WORK_DIR}/droidport_init_wrapper.c" -o "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
 chmod 0755 "${WORK_DIR}/mnt/sbin/droidport_init_wrapper"
 WRAP_INFO=$(file -b "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" || echo "unknown")
 echo "Verified PID-1 wrapper binary: ${WRAP_INFO}"
@@ -571,11 +644,17 @@ if [ -n "${INIT_DIR}" ]; then
   echo "Injecting ${INIT_DIR}/init.portable_selinux.rc for Enforcing/Permissive & KernelSU Next Magic Mount..."
   cat <<'EOF' > "${INIT_DIR}/init.portable_selinux.rc"
 on post-fs-data
-    restorecon_recursive /data
-    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; /data/adb/ksud sepolicy patch 'allow hal_graphics_composer_default * * *' 'allow surfaceflinger * * *' 'allow su * * *' 2>/dev/null || true; fi"
+    restorecon_recursive /data/adb
+    restorecon_recursive /data/local/tmp
+    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; /data/adb/ksud sepolicy patch 'allow hal_graphics_composer_default * * *' 'allow surfaceflinger * * *' 'allow su * * *' 2>/dev/null || true; fi"
+
+on boot
+    setprop ro.hardware.egl mesa
+    setprop debug.hwui.renderer opengl
+    setprop ro.hwui.use_vulkan false
 
 on property:sys.boot_completed=1
-    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
+    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
 EOF
   chmod 0644 "${INIT_DIR}/init.portable_selinux.rc"
 fi
@@ -651,6 +730,7 @@ _dp_log() {
   fi
 }
 
+_dp_log "Kernel release: $(uname -r 2>/dev/null || echo unknown) | initrd flavor: $([ -x /sbin/ksud ] && echo ksunext || echo stock)"
 _dp_log "VirtIO block devices: $(ls -1 /dev/vd* 2>/dev/null | tr '\n' ' ' || echo none)"
 
 TARGET_ROOT="/android"

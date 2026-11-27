@@ -1,0 +1,5 @@
+{
+  "name": "Portable Android 13 Launcher & Diagnostics",
+  "description": "Web console, QEMU command builder, device spoof inspector, and boot-hang diagnostics for Portable Android 13 (LineageOS 20 + Bliss OS 16.9).",
+  "requestFramePermissions": []
+}

@@ -38,6 +38,7 @@ try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
 except Exception:
+    HAS_DND = False
     DND_FILES = None
     TkinterDnD = None
 
@@ -174,12 +175,43 @@ TEXTS: Dict[str, Dict[str, str]] = {
 DEFAULT_PROFILES = ["Clean_Gaming", "Root_Modding"]
 
 
-def console_log(msg: str) -> None:
-    ts = time.strftime("%H:%M:%S")
+_LOG_LOCK = threading.Lock()
+_BOOT_LOG_PATH = BASE_DIR / "last_boot.log"
+
+
+def _disable_windows_console_quick_edit() -> None:
+    """Prevent accidental CMD clicks ('Select ...' QuickEdit Mode) from freezing stdout across threads."""
+    if sys.platform != "win32":
+        return
     try:
-        print(f"[{ts}] {msg}", flush=True)
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        std_input_handle = -10
+        h_in = kernel32.GetStdHandle(std_input_handle)
+        if not h_in or h_in == -1:
+            return
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h_in, ctypes.byref(mode)):
+            enable_quick_edit = 0x0040
+            enable_extended_flags = 0x0080
+            new_mode = (mode.value & ~enable_quick_edit) | enable_extended_flags
+            kernel32.SetConsoleMode(h_in, new_mode)
     except Exception:
         pass
+
+
+def console_log(msg: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    with _LOG_LOCK:
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+        try:
+            with _BOOT_LOG_PATH.open("a", encoding="utf-8", errors="replace") as lf:
+                lf.write(line + "\n")
+        except Exception:
+            pass
 
 
 def _no_window_flags() -> int:
@@ -239,6 +271,7 @@ class PortableAndroidLauncher(BaseCTk):
         self.accel_mode = ctk.StringVar(value=cfg.get("accel_mode", "auto"))
         self.gpu_choice = ctk.StringVar(value=cfg.get("gpu", "angle"))
         self.active_profile = ctk.StringVar(value=cfg.get("profile", "Root_Modding"))
+        self.loaded_profile: str = ""
         self.auto_clip_var = ctk.BooleanVar(value=bool(cfg.get("auto_clip", True)))
         self.wifi_sim_enabled = ctk.BooleanVar(value=bool(cfg.get("wifi_sim_enabled", True)))
         self.app_filter_var = ctk.StringVar(value="")
@@ -306,6 +339,7 @@ class PortableAndroidLauncher(BaseCTk):
             existing = DEFAULT_PROFILES.copy()
         if existing and self.active_profile.get() not in existing:
             self.active_profile.set(existing[0])
+        self.loaded_profile = self.active_profile.get()
 
     def _list_profiles(self) -> List[str]:
         found = sorted([p.stem for p in self.profiles_dir.glob("*.qcow2")])
@@ -432,6 +466,7 @@ class PortableAndroidLauncher(BaseCTk):
             width=155,
             fg_color="#0F172A",
             button_color="#334155",
+            command=self._on_profile_select,
         )
         self.profile_menu.pack(side="left", padx=(0, 6))
         self.btn_prof_switch = ctk.CTkButton(
@@ -827,20 +862,42 @@ class PortableAndroidLauncher(BaseCTk):
         self._save_config()
 
     # ---------------- Storage Profile Actions ----------------
+    def _on_profile_select(self, chosen: str) -> None:
+        if chosen == self.loaded_profile:
+            return
+        if self.vm_process and self.vm_process.poll() is None:
+            if self.loaded_profile:
+                self.active_profile.set(self.loaded_profile)
+            messagebox.showwarning("VM Running", "Tắt máy ảo trước khi đổi hồ sơ bộ nhớ / Stop VM first.")
+            return
+        self._activate_profile(chosen, force_reload=False)
+
+    def _activate_profile(self, chosen: str, force_reload: bool = False) -> None:
+        src = self.profiles_dir / f"{chosen}.qcow2"
+        data_img = self.images_dir / "data.img"
+        if not src.exists():
+            if self.loaded_profile:
+                self.active_profile.set(self.loaded_profile)
+            messagebox.showerror("Missing Profile", f"Not found: {src}")
+            return
+        if not force_reload and self.loaded_profile and self.loaded_profile != chosen and data_img.exists():
+            prev_dst = self.profiles_dir / f"{self.loaded_profile}.qcow2"
+            try:
+                shutil.copy2(data_img, prev_dst)
+            except Exception as exc:
+                console_log(f"[PROFILE] Warning: could not sync previous profile {self.loaded_profile}: {exc}")
+        shutil.copy2(src, data_img)
+        self.loaded_profile = chosen
+        self.active_profile.set(chosen)
+        self._save_config()
+        console_log(f"[PROFILE] Switched active data.img -> {chosen}")
+        self.status_text.set(f"Profile active: {chosen}")
+
     def switch_profile(self) -> None:
         if self.vm_process and self.vm_process.poll() is None:
             messagebox.showwarning("VM Running", "Tắt máy ảo trước khi đổi hồ sơ bộ nhớ / Stop VM first.")
             return
-        chosen = self.active_profile.get()
-        src = self.profiles_dir / f"{chosen}.qcow2"
-        data_img = self.images_dir / "data.img"
-        if not src.exists():
-            messagebox.showerror("Missing Profile", f"Not found: {src}")
-            return
-        shutil.copy2(src, data_img)
-        self._save_config()
-        console_log(f"[PROFILE] Switched active data.img -> {chosen}")
-        self.status_text.set(f"Profile active: {chosen}")
+        self._activate_profile(self.active_profile.get(), force_reload=True)
 
     def clone_profile(self) -> None:
         if self.vm_process and self.vm_process.poll() is None:
@@ -854,10 +911,16 @@ class PortableAndroidLauncher(BaseCTk):
         safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", new_name)
         if not safe_name:
             return
+        if self.loaded_profile and self.loaded_profile != safe_name:
+            try:
+                shutil.copy2(data_img, self.profiles_dir / f"{self.loaded_profile}.qcow2")
+            except Exception:
+                pass
         dst = self.profiles_dir / f"{safe_name}.qcow2"
         shutil.copy2(data_img, dst)
         self.profile_menu.configure(values=self._list_profiles())
         self.active_profile.set(safe_name)
+        self.loaded_profile = safe_name
         self._save_config()
         console_log(f"[PROFILE] Cloned current data.img -> {dst.name}")
         self.status_text.set(f"Cloned profile: {safe_name}")
@@ -878,7 +941,7 @@ class PortableAndroidLauncher(BaseCTk):
                 text=True,
                 creationflags=_no_window_flags(),
             )
-            chosen = self.active_profile.get()
+            chosen = self.loaded_profile or self.active_profile.get()
             prof_img = self.profiles_dir / f"{chosen}.qcow2"
             if prof_img.exists():
                 shutil.copy2(data_img, prof_img)
@@ -966,6 +1029,13 @@ class PortableAndroidLauncher(BaseCTk):
                 low = clean.lower()
                 if "early console in extract_kernel" in low:
                     boot_state["decompressor_count"] = boot_state.get("decompressor_count", 0) + 1
+                if "executing: exec" in low and "switch_root" in low:
+                    boot_state["switch_root_seen"] = True
+                    boot_state["switch_root_ts"] = time.time()
+                if "[init-wrapper]" in low:
+                    boot_state["init_wrapper_seen"] = True
+                if "[android/kmsg]" in low or "init first stage" in low or "init second stage" in low or "selinux_setup" in low:
+                    boot_state["android_init_seen"] = True
                 if (
                     "linux version" in low
                     or "[    0." in low
@@ -978,6 +1048,7 @@ class PortableAndroidLauncher(BaseCTk):
                     or "android" in low
                 ):
                     boot_state["kernel_seen"] = True
+                boot_state["last_serial_ts"] = time.time()
                 tail = boot_state.setdefault("serial_tail", [])
                 tail.append(clean)
                 if len(tail) > 20:
@@ -1094,12 +1165,15 @@ class PortableAndroidLauncher(BaseCTk):
         if use_pio_fw_cfg:
             cmd += ["-global", "fw_cfg.dma_enabled=off"]
 
-        # Intel HD Graphics 4000 (OpenGL 4.0 / DirectX 11 ANGLE, NO Vulkan): prefer virtio-vga-gl -> virtio-gpu-gl-pci -> -vga std
-        if use_angle and gl_device_mode != "std":
+        # Intel HD Graphics 4000 (OpenGL 4.0 / DirectX 11 ANGLE, NO Vulkan):
+        # Cascade: virtio-vga-gl -> virtio-gpu-gl-pci -> virtio-vga (DRM llvmpipe, gl=off) -> -vga std
+        if use_angle and gl_device_mode in ("vga_gl", "gpu_gl_pci"):
             dev_spec = "virtio-vga-gl,xres=1280,yres=720" if gl_device_mode == "vga_gl" else "virtio-gpu-gl-pci,xres=1280,yres=720"
             if gl_device_mode == "gpu_gl_pci":
                 cmd += ["-vga", "none"]
             cmd += ["-device", dev_spec, "-display", "sdl,gl=es"]
+        elif gl_device_mode == "virtio_sw":
+            cmd += ["-device", "virtio-vga,xres=1280,yres=720", "-display", "sdl,gl=off"]
         else:
             cmd += ["-vga", "std", "-display", "sdl,gl=off"]
 
@@ -1126,8 +1200,8 @@ class PortableAndroidLauncher(BaseCTk):
                 "root=/dev/ram0 androidboot.hardware=android_x86_64 "
                 "androidboot.selinux=permissive androidboot.init_fatal_panic=true "
                 "DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 "
-                "nokaslr panic=0 console=tty0 console=ttyS0,115200 "
-                "earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep SERIAL=ttyS0 loglevel=7"
+                "nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 "
+                "console=tty0 console=ttyS0,115200 SERIAL=ttyS0 loglevel=7"
             ),
             "-serial", serial_target,
         ]
@@ -1180,7 +1254,7 @@ class PortableAndroidLauncher(BaseCTk):
         if not issues:
             console_log(
                 f"[PREFLIGHT] OK · Kernel={kernel_name} · Initrd={initrd_file.name} · Accel={self.accel_mode.get().upper()} · "
-                f"RAM={initial_ram_mb}MB · GPU={'ANGLE-D3D11 (virtio-vga-gl)' if allow_angle else 'Std-VGA'}"
+                f"RAM={initial_ram_mb}MB · GPU={'ANGLE-D3D11 (virtio-vga-gl)' if allow_angle else 'VirtIO-SW (gl=off)'}"
             )
         return (len(issues) == 0, issues, allow_angle, initial_ram_mb)
 
@@ -1345,6 +1419,11 @@ class PortableAndroidLauncher(BaseCTk):
             "android",
         )
 
+        try:
+            _BOOT_LOG_PATH.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+
         adb_started = False
         diag_captured = False
 
@@ -1357,7 +1436,7 @@ class PortableAndroidLauncher(BaseCTk):
             tier_ram_mb = initial_ram_mb
             use_hpet_off = True
             use_pio_fw_cfg = not (tier_id.startswith("whpx") or tier_id.startswith("aehd") or tier_id.startswith("haxm"))
-            gl_device_mode = "vga_gl" if tier_angle else "std"
+            gl_device_mode = "vga_gl" if tier_angle else "virtio_sw"
 
             if tier_kernel == "kernel_stock" and primary_kernel == "kernel_ksunext":
                 console_log(
@@ -1402,8 +1481,14 @@ class PortableAndroidLauncher(BaseCTk):
                     adb_started = True
                     threading.Thread(target=self._adb_logcat_worker, daemon=True).start()
 
+                start_ts = time.time()
                 boot_state = {
                     "kernel_seen": False,
+                    "switch_root_seen": False,
+                    "switch_root_ts": 0.0,
+                    "init_wrapper_seen": False,
+                    "android_init_seen": False,
+                    "last_serial_ts": start_ts,
                     "decompressor_count": 0,
                     "killed_by_watchdog": False,
                     "mem_error": False,
@@ -1413,7 +1498,6 @@ class PortableAndroidLauncher(BaseCTk):
                     "serial_tail": [],
                 }
                 tier_done = threading.Event()
-                start_ts = time.time()
 
                 tailer_thread = threading.Thread(
                     target=self._stream_file_serial,
@@ -1422,41 +1506,83 @@ class PortableAndroidLauncher(BaseCTk):
                 )
                 tailer_thread.start()
 
-                if idx < len(cascade) - 1:
-                    wait_secs = 20.0 if tier_id.startswith("tcg") else 18.0
+                has_next_tier = idx < len(cascade) - 1
+                prekernel_secs = 22.0 if tier_id.startswith("tcg") else 18.0
+                stall_secs = 120.0 if tier_id.startswith("tcg") else 75.0
 
-                    def _watchdog(p: subprocess.Popen = proc, secs: float = wait_secs, tid: str = tier_id, tk: str = tier_kernel) -> None:
-                        elapsed_w = 0.0
-                        while elapsed_w < secs:
-                            if tier_done.wait(0.4):
-                                return
-                            elapsed_w += 0.4
-                            if (
-                                not self.stop_log_threads.is_set()
-                                and boot_state.get("decompressor_count", 0) >= 2
-                                and not boot_state["kernel_seen"]
-                                and not self.adb_connected
-                                and p.poll() is None
-                            ):
+                def _watchdog(
+                    p: subprocess.Popen = proc,
+                    pk_secs: float = prekernel_secs,
+                    st_secs: float = stall_secs,
+                    tid: str = tier_id,
+                    tk: str = tier_kernel,
+                    can_escalate: bool = has_next_tier,
+                ) -> None:
+                    last_hint_ts = 0.0
+                    while not tier_done.wait(0.5):
+                        if self.stop_log_threads.is_set() or self.adb_connected or p.poll() is not None:
+                            return
+                        now = time.time()
+                        elapsed_w = now - start_ts
+
+                        # 1) Detect early extract_kernel reboot loop
+                        if boot_state.get("decompressor_count", 0) >= 2 and not boot_state["kernel_seen"]:
+                            if can_escalate:
                                 boot_state["killed_by_watchdog"] = True
                                 console_log(
                                     f"[WATCHDOG] {tid} ({tk}) looped after 'Booting the kernel' (extract_kernel ran {boot_state['decompressor_count']}x) -> stopping & rescuing..."
                                 )
                                 self._force_kill_vm(p)
                                 return
-                        if (
-                            not self.stop_log_threads.is_set()
-                            and not boot_state["kernel_seen"]
-                            and not self.adb_connected
-                            and p.poll() is None
-                        ):
-                            boot_state["killed_by_watchdog"] = True
-                            console_log(
-                                f"[WATCHDOG] {tid} ({tk}) failed to reach Linux kernel boot after {secs:.0f}s -> stopping & escalating..."
-                            )
-                            self._force_kill_vm(p)
 
-                    threading.Thread(target=_watchdog, daemon=True).start()
+                        # 2) Detect pre-kernel hang
+                        if not boot_state["kernel_seen"] and elapsed_w >= pk_secs:
+                            if can_escalate:
+                                boot_state["killed_by_watchdog"] = True
+                                console_log(
+                                    f"[WATCHDOG] {tid} ({tk}) failed to reach Linux kernel boot after {pk_secs:.0f}s -> stopping & escalating..."
+                                )
+                                self._force_kill_vm(p)
+                                return
+
+                        # 3) Detect silent hang right at switch_root -> droidport_init_wrapper
+                        sr_ts = boot_state.get("switch_root_ts", 0.0)
+                        if (
+                            boot_state.get("switch_root_seen")
+                            and not boot_state.get("init_wrapper_seen")
+                            and sr_ts > 0
+                            and (now - sr_ts) >= 25.0
+                        ):
+                            if can_escalate:
+                                boot_state["killed_by_watchdog"] = True
+                                console_log(
+                                    f"[WATCHDOG] {tid} ({tk}) stalled for 25s right after switch_root (no [INIT-WRAPPER] output) -> stopping & escalating..."
+                                )
+                                self._force_kill_vm(p)
+                                return
+                            elif now - last_hint_ts > 30.0:
+                                last_hint_ts = now
+                                console_log(
+                                    f"[DIAG-HINT] {tid} ({tk}) has not emitted [INIT-WRAPPER] after switch_root. Try toggling 'TCG (Safe)' or 'Software' GPU if frozen."
+                                )
+
+                        # 4) Detect post-switch_root Android init stall (zero serial/kmsg activity)
+                        idle_secs = now - boot_state.get("last_serial_ts", start_ts)
+                        if boot_state.get("switch_root_seen") and idle_secs >= st_secs:
+                            if can_escalate:
+                                boot_state["killed_by_watchdog"] = True
+                                console_log(
+                                    f"[WATCHDOG] {tid} ({tk}) had no serial/kmsg activity for {st_secs:.0f}s before ADB online -> escalating..."
+                                )
+                                self._force_kill_vm(p)
+                                return
+                            elif now - last_hint_ts > 45.0:
+                                last_hint_ts = now
+                                console_log(
+                                    f"[DIAG-HINT] Still waiting for Android ADB on {tid} ({tk}); no serial logs for {idle_secs:.0f}s."
+                                )
+
+                threading.Thread(target=_watchdog, daemon=True).start()
 
                 assert proc.stdout is not None
                 for line in proc.stdout:
@@ -1472,7 +1598,7 @@ class PortableAndroidLauncher(BaseCTk):
                             boot_state["hpet_opt_error"] = True
                         if "fw_cfg" in low and ("not found" in low or "invalid" in low or "unknown" in low or "property" in low):
                             boot_state["fwcfg_opt_error"] = True
-                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "opengl is not available", "egl", "gl=es", "virgl")):
+                        if any(gm in low for gm in ("virtio-vga-gl", "virtio-gpu-gl", "virtio-vga", "opengl is not available", "egl", "gl=es", "virgl")):
                             if any(err in low for err in ("not found", "invalid", "unknown", "unsupported", "could not", "failed", "no such", "error")):
                                 boot_state["gl_opt_error"] = True
                         if "invalid option" in low:
@@ -1498,9 +1624,14 @@ class PortableAndroidLauncher(BaseCTk):
                 elapsed = time.time() - start_ts
                 console_log(f"[QEMU · {tier_id} · {tier_kernel}] Exited with code {rc} after {elapsed:.1f}s")
 
-                if not self.stop_log_threads.is_set() and boot_state["gl_opt_error"] and gl_device_mode != "std":
-                    next_gl = "gpu_gl_pci" if gl_device_mode == "vga_gl" else "std"
-                    console_log(f"[RETRY] HD 4000 GL device '{gl_device_mode}' rejected -> stepping down to '{next_gl}'...")
+                _gl_next = {
+                    "vga_gl": "gpu_gl_pci",
+                    "gpu_gl_pci": "virtio_sw",
+                    "virtio_sw": "std",
+                }
+                if not self.stop_log_threads.is_set() and boot_state["gl_opt_error"] and gl_device_mode in _gl_next:
+                    next_gl = _gl_next[gl_device_mode]
+                    console_log(f"[RETRY] Display/GL device '{gl_device_mode}' unsupported -> stepping down to '{next_gl}'...")
                     gl_device_mode = next_gl
                     continue
 
@@ -1524,6 +1655,18 @@ class PortableAndroidLauncher(BaseCTk):
                         self._set_status(f"Retrying {tier_id} with {tier_ram_mb}MB RAM...")
                         time.sleep(0.4)
                         continue
+
+                if (
+                    not self.stop_log_threads.is_set()
+                    and rc != 0
+                    and elapsed < 15.0
+                    and not boot_state["killed_by_watchdog"]
+                    and gl_device_mode in _gl_next
+                ):
+                    next_gl = _gl_next[gl_device_mode]
+                    console_log(f"[RETRY] Early QEMU crash on '{gl_device_mode}' ({elapsed:.1f}s, rc={rc}) -> stepping down to '{next_gl}'...")
+                    gl_device_mode = next_gl
+                    continue
 
                 break
 
@@ -1565,8 +1708,8 @@ class PortableAndroidLauncher(BaseCTk):
                 continue
             break
 
-        # Sync updated data.img back into selected profile on clean shutdown
-        chosen = self.active_profile.get()
+        # Sync updated data.img back into currently loaded profile on shutdown
+        chosen = self.loaded_profile or self.active_profile.get()
         data_img = self.images_dir / "data.img"
         if data_img.exists() and chosen:
             try:
@@ -1584,7 +1727,11 @@ class PortableAndroidLauncher(BaseCTk):
             return
         console_log("[ADB] Waiting for Android ADB on 127.0.0.1:5555...")
         connected = False
-        while not self.stop_log_threads.is_set() and self.vm_process and self.vm_process.poll() is None:
+        while not self.stop_log_threads.is_set():
+            proc = self.vm_process
+            if proc is None or proc.poll() is not None:
+                time.sleep(1.0)
+                continue
             try:
                 subprocess.run(
                     [str(self.adb_exe), "connect", "127.0.0.1:5555"],
@@ -1736,7 +1883,8 @@ class PortableAndroidLauncher(BaseCTk):
                     check=True, capture_output=True, text=True, creationflags=_no_window_flags(),
                 )
                 console_log("[STORAGE] Created blank 16GB qcow2 data.img (initrd hook will format ext4 on boot).")
-            prof_file = self.profiles_dir / f"{self.active_profile.get()}.qcow2"
+            prof_target = self.loaded_profile or self.active_profile.get()
+            prof_file = self.profiles_dir / f"{prof_target}.qcow2"
             shutil.copy2(data_file, prof_file)
             self.status_text.set("Data wiped (16GB clean ext4)")
         except Exception as exc:
@@ -1789,7 +1937,8 @@ class PortableAndroidLauncher(BaseCTk):
                 [str(self.qemu_img_exe), "snapshot", "-c", "portable_restore", str(data_img)],
                 check=True, capture_output=True, text=True, creationflags=_no_window_flags(),
             )
-            prof_file = self.profiles_dir / f"{self.active_profile.get()}.qcow2"
+            prof_target = self.loaded_profile or self.active_profile.get()
+            prof_file = self.profiles_dir / f"{prof_target}.qcow2"
             shutil.copy2(data_img, prof_file)
             console_log("[SNAPSHOT] Saved restore point 'portable_restore' inside data.img.")
             self.status_text.set("Snapshot saved: portable_restore")
@@ -1819,7 +1968,8 @@ class PortableAndroidLauncher(BaseCTk):
                 [str(self.qemu_img_exe), "snapshot", "-a", "portable_restore", str(data_img)],
                 check=True, capture_output=True, text=True, creationflags=_no_window_flags(),
             )
-            prof_file = self.profiles_dir / f"{self.active_profile.get()}.qcow2"
+            prof_target = self.loaded_profile or self.active_profile.get()
+            prof_file = self.profiles_dir / f"{prof_target}.qcow2"
             shutil.copy2(data_img, prof_file)
             console_log("[SNAPSHOT] Restored data.img to snapshot 'portable_restore'.")
             self.status_text.set("Snapshot restored: portable_restore")
@@ -2124,6 +2274,7 @@ class PortableAndroidLauncher(BaseCTk):
 
 
 def main() -> int:
+    _disable_windows_console_quick_edit()
     try:
         app = PortableAndroidLauncher()
         app.mainloop()
