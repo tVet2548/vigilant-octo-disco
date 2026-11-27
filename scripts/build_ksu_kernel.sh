@@ -504,14 +504,23 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       --enable CONFIG_RD_XZ \
       --enable CONFIG_RD_LZ4 \
       --enable CONFIG_RD_ZSTD \
+      --enable CONFIG_FB \
+      --enable CONFIG_SYSFB \
+      --enable CONFIG_SYSFB_SIMPLEFB \
       --enable CONFIG_DRM \
+      --enable CONFIG_DRM_KMS_HELPER \
+      --enable CONFIG_DRM_VRAM_HELPER \
+      --enable CONFIG_DRM_TTM \
+      --enable CONFIG_DRM_TTM_HELPER \
+      --enable CONFIG_DRM_GEM_SHMEM_HELPER \
       --enable CONFIG_DRM_FBDEV_EMULATION \
       --enable CONFIG_FRAMEBUFFER_CONSOLE \
       --enable CONFIG_DRM_VIRTIO_GPU \
       --enable CONFIG_DRM_BOCHS \
       --enable CONFIG_DRM_SIMPLEDRM \
+      --disable CONFIG_DRM_VGEM \
       --enable CONFIG_FB_VESA \
-      --enable CONFIG_FB_SIMPLE \
+      --disable CONFIG_FB_SIMPLE \
       --enable CONFIG_USB \
       --enable CONFIG_USB_PCI \
       --enable CONFIG_USB_UHCI_HCD \
@@ -595,13 +604,22 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
 
     yes "" | make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig >/dev/null 2>&1 || make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig
     echo "Verified critical kernel symbols (${MODE}):"
-    grep -E 'CONFIG_(CC_IS_CLANG|LD_IS_LLD|KSU|KSU_X86_PATCH_SYSCALL_DISPATCHER|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|EFI_STUB|PARAVIRT|GENERIC_CPU|KERNEL_GZIP|BPF_SYSCALL|CGROUP_BPF|PSI|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|DEVTMPFS)' .config | head -n 90 || true
+    grep -E 'CONFIG_(CC_IS_CLANG|LD_IS_LLD|KSU|KSU_X86_PATCH_SYSCALL_DISPATCHER|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|EFI_STUB|PARAVIRT|GENERIC_CPU|KERNEL_GZIP|BPF_SYSCALL|CGROUP_BPF|PSI|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|FB|DRM|DRM_KMS_HELPER|DRM_FBDEV_EMULATION|FRAMEBUFFER_CONSOLE|DRM_VIRTIO_GPU|DRM_BOCHS|DRM_SIMPLEDRM|DRM_VGEM|DMABUF_HEAPS_SYSTEM|SYNC_FILE|ANDROID_BINDER|DEVTMPFS)' .config | head -n 110 || true
     grep -q '^CONFIG_KSU=y' .config
     grep -q '^CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y' .config
     grep -q '^CONFIG_OVERLAY_FS=y' .config
     grep -q '^CONFIG_VIRTIO_BLK=y' .config
     grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' .config
+    grep -q '^CONFIG_FB=y' .config
+    grep -q '^CONFIG_DRM=y' .config
+    grep -q '^CONFIG_DRM_KMS_HELPER=y' .config
+    grep -q '^CONFIG_DRM_FBDEV_EMULATION=y' .config
+    grep -q '^CONFIG_FRAMEBUFFER_CONSOLE=y' .config
     grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
+    grep -q '^CONFIG_DRM_BOCHS=y' .config
+    grep -q '^CONFIG_DRM_SIMPLEDRM=y' .config
+    grep -q '^CONFIG_DMABUF_HEAPS_SYSTEM=y' .config
+    grep -q '^CONFIG_SYNC_FILE=y' .config
     grep -q '^CONFIG_DEVTMPFS=y' .config
     grep -q '^CONFIG_DEVTMPFS_MOUNT=y' .config
     grep -q '^CONFIG_TMPFS=y' .config

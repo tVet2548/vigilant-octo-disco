@@ -1036,6 +1036,13 @@ class PortableAndroidLauncher(BaseCTk):
                     boot_state["init_wrapper_seen"] = True
                 if "[android/kmsg]" in low or "init first stage" in low or "init second stage" in low or "selinux_setup" in low:
                     boot_state["android_init_seen"] = True
+                if "[portable-gfx]" in low:
+                    boot_state["gfx_init_seen"] = True
+                if "vendor.hwcomposer" in low and ("exited with status" in low or "crashed" in low):
+                    if "exited with status 0" not in low:
+                        boot_state["hwc_fail_count"] = boot_state.get("hwc_fail_count", 0) + 1
+                if "surfaceflinger" in low and ("killed by signal 9" in low or "signal 9" in low or ("restarting" in low and "hwcomposer" not in low)):
+                    boot_state["sf_fail_count"] = boot_state.get("sf_fail_count", 0) + 1
                 if (
                     "linux version" in low
                     or "[    0." in low
@@ -1170,14 +1177,19 @@ class PortableAndroidLauncher(BaseCTk):
         # Cascade: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on/OpenGL 4.0) -> virtio-vga (DRM llvmpipe, gl=off) -> -vga std
         if use_angle and gl_device_mode == "vga_gl":
             cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=es"]
+            gfx_cmdline = "HWACCEL=1 video=1280x720"
         elif gl_device_mode == "vga_gl_desktop":
             cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=on"]
+            gfx_cmdline = "HWACCEL=1 video=1280x720"
         elif gl_device_mode == "gpu_gl_pci":
             cmd += ["-vga", "none", "-device", "virtio-gpu-gl-pci,xres=1280,yres=720", "-display", "sdl,gl=on"]
+            gfx_cmdline = "HWACCEL=1 video=1280x720"
         elif gl_device_mode == "virtio_sw":
             cmd += ["-device", "virtio-vga,xres=1280,yres=720", "-display", "sdl,gl=off"]
+            gfx_cmdline = "HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb video=1280x720"
         else:
             cmd += ["-vga", "std", "-display", "sdl,gl=off"]
+            gfx_cmdline = "HWACCEL=0 EGL=angle HWC_HIDL=drmfb video=1280x720"
 
         if diag_log_path is not None:
             cmd += ["-d", "guest_errors,cpu_reset", "-D", str(diag_log_path)]
@@ -1201,6 +1213,7 @@ class PortableAndroidLauncher(BaseCTk):
             "-append", (
                 "root=/dev/ram0 androidboot.hardware=android_x86_64 "
                 "androidboot.selinux=permissive androidboot.init_fatal_panic=true "
+                f"{gfx_cmdline} "
                 "DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 "
                 "nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 "
                 "console=tty0 console=ttyS0,115200 SERIAL=ttyS0 loglevel=7"
@@ -1498,6 +1511,10 @@ class PortableAndroidLauncher(BaseCTk):
                     "switch_root_ts": 0.0,
                     "init_wrapper_seen": False,
                     "android_init_seen": False,
+                    "gfx_init_seen": False,
+                    "hwc_fail_count": 0,
+                    "sf_fail_count": 0,
+                    "gfx_loop_detected": False,
                     "last_serial_ts": start_ts,
                     "decompressor_count": 0,
                     "killed_by_watchdog": False,
@@ -1516,6 +1533,13 @@ class PortableAndroidLauncher(BaseCTk):
                 )
                 tailer_thread.start()
 
+                _gl_next = {
+                    "vga_gl": "vga_gl_desktop",
+                    "vga_gl_desktop": "virtio_sw",
+                    "gpu_gl_pci": "virtio_sw",
+                    "virtio_sw": "std",
+                }
+                has_gl_fallback = gl_device_mode in _gl_next
                 has_next_tier = idx < len(cascade) - 1
                 prekernel_secs = 28.0 if tier_id.startswith("tcg") else 18.0
                 stall_secs = 150.0 if tier_id.startswith("tcg") else 110.0
@@ -1526,6 +1550,8 @@ class PortableAndroidLauncher(BaseCTk):
                     st_secs: float = stall_secs,
                     tid: str = tier_id,
                     tk: str = tier_kernel,
+                    gl_mode: str = gl_device_mode,
+                    can_gl_fallback: bool = has_gl_fallback,
                     can_escalate: bool = has_next_tier,
                 ) -> None:
                     last_hint_ts = 0.0
@@ -1592,6 +1618,20 @@ class PortableAndroidLauncher(BaseCTk):
                                     f"[DIAG-HINT] Still waiting for Android ADB on {tid} ({tk}); no serial logs for {idle_secs:.0f}s."
                                 )
 
+                        # 5) Detect vendor.hwcomposer / surfaceflinger graphics HAL crash loop
+                        hwc_fails = boot_state.get("hwc_fail_count", 0)
+                        sf_fails = boot_state.get("sf_fail_count", 0)
+                        if hwc_fails >= 2 or sf_fails >= 3:
+                            if can_gl_fallback or can_escalate:
+                                boot_state["gfx_loop_detected"] = True
+                                boot_state["killed_by_watchdog"] = True
+                                console_log(
+                                    f"[WATCHDOG] Graphics HAL crash loop on {tid} ({tk}, gpu={gl_mode}: "
+                                    f"hwcomposer_fails={hwc_fails}, surfaceflinger_fails={sf_fails}) -> stepping down..."
+                                )
+                                self._force_kill_vm(p)
+                                return
+
                 threading.Thread(target=_watchdog, daemon=True).start()
 
                 assert proc.stdout is not None
@@ -1642,12 +1682,14 @@ class PortableAndroidLauncher(BaseCTk):
                 elapsed = time.time() - start_ts
                 console_log(f"[QEMU · {tier_id} · {tier_kernel}] Exited with code {rc} after {elapsed:.1f}s")
 
-                _gl_next = {
-                    "vga_gl": "vga_gl_desktop",
-                    "vga_gl_desktop": "virtio_sw",
-                    "gpu_gl_pci": "virtio_sw",
-                    "virtio_sw": "std",
-                }
+                if not self.stop_log_threads.is_set() and boot_state.get("gfx_loop_detected") and gl_device_mode in _gl_next:
+                    next_gl = _gl_next[gl_device_mode]
+                    console_log(
+                        f"[RETRY] Graphics HAL (hwcomposer/surfaceflinger) crash loop on '{gl_device_mode}' -> stepping down GPU to '{next_gl}'..."
+                    )
+                    gl_device_mode = next_gl
+                    continue
+
                 if not self.stop_log_threads.is_set() and boot_state["gl_opt_error"] and gl_device_mode in _gl_next:
                     next_gl = _gl_next[gl_device_mode]
                     console_log(f"[RETRY] Display/GL device '{gl_device_mode}' unsupported/failed -> stepping down to '{next_gl}'...")

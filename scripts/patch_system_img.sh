@@ -186,12 +186,14 @@ else
   echo "WARNING: Standard GApps APKs not detected by filename under ${WORK_DIR}/mnt (continuing)." >&2
 fi
 
-echo "Patching ${PROP_FILE} for Intel HD 4000 OpenGL 4.0 / DirectX 11 ANGLE (No Vulkan)..."
+echo "Patching ${PROP_FILE} for dynamic Intel HD 4000 / VirtIO / Software GL compatibility (No Vulkan)..."
 sed -i '/^debug\.hwui\.renderer=/d' "${PROP_FILE}"
 sed -i '/^ro\.hwui\.use_vulkan=/d' "${PROP_FILE}"
 sed -i '/^persist\.sys\.ui\.hw=/d' "${PROP_FILE}"
 sed -i '/^debug\.sf\.hw=/d' "${PROP_FILE}"
 sed -i '/^ro\.hardware\.egl=/d' "${PROP_FILE}"
+sed -i '/^ro\.hardware\.hwcomposer=/d' "${PROP_FILE}"
+sed -i '/^ro\.hardware\.gralloc=/d' "${PROP_FILE}"
 sed -i '/^ro\.opengles\.version=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist64=/d' "${PROP_FILE}"
@@ -199,12 +201,9 @@ sed -i '/^ro\.dalvik\.vm\.native\.bridge=/d' "${PROP_FILE}"
 
 cat <<'EOF' >> "${PROP_FILE}"
 
-# Intel HD Graphics 4000 (Ivy Bridge) OpenGL ES / ANGLE Optimization (No Vulkan)
+# Intel HD Graphics 4000 (Ivy Bridge) Display Defaults (ro.hardware.egl left dynamic for init.sh / cmdline)
 debug.hwui.renderer=opengl
 ro.hwui.use_vulkan=false
-persist.sys.ui.hw=1
-debug.sf.hw=1
-ro.hardware.egl=mesa
 ro.opengles.version=196608
 
 # Enable ARM64-v8a / ARMv7a Native Bridge Translation on x86_64
@@ -289,20 +288,52 @@ if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
       sed -i '/first_stage_mount/d' "${V_FSTAB}" 2>/dev/null || true
     fi
   done
+  echo "--- Inventory: system/vendor init & graphics HALs ---"
+  ls -la "${WORK_DIR}/mnt"/init*.rc "${WORK_DIR}/vendor_mnt/etc/init/hw/"*.rc 2>/dev/null || true
+  ls -la "${WORK_DIR}/vendor_mnt/etc/init/"*composer* "${WORK_DIR}/vendor_mnt/etc/init/"*gralloc* "${WORK_DIR}/vendor_mnt/etc/init/"*alloc* 2>/dev/null || true
+  ls -la "${WORK_DIR}/vendor_mnt/lib64/hw/"*hwcomposer* "${WORK_DIR}/vendor_mnt/lib64/hw/"*gralloc* 2>/dev/null || true
+
+  # Ensure vendor/build.prop does not lock ro.hardware.egl so cmdline EGL/HWACCEL works dynamically
+  for VPROP in "${WORK_DIR}/vendor_mnt/build.prop" "${WORK_DIR}/vendor_mnt/default.prop"; do
+    if [ -f "${VPROP}" ]; then
+      sed -i '/^ro\.hardware\.egl=/d;/^ro\.hardware\.hwcomposer=/d;/^ro\.hardware\.gralloc=/d' "${VPROP}" 2>/dev/null || true
+    fi
+  done
+
   for RC_CAND in \
     "/tmp/bliss_donor_meta/init.android_x86_64.rc" \
+    "${WORK_DIR}/mnt/init.android_x86_64.rc" \
+    "${WORK_DIR}/mnt/init.bliss_x86_64.rc" \
+    "${WORK_DIR}/mnt/init.x86_64.rc" \
+    "${WORK_DIR}/mnt/init.x86.rc" \
     "${WORK_DIR}/bliss_mnt/init.android_x86_64.rc" \
+    "${WORK_DIR}/bliss_mnt/init.bliss_x86_64.rc" \
+    "${WORK_DIR}/vendor_mnt/etc/init/hw/init.bliss_x86_64.rc" \
+    "${WORK_DIR}/vendor_mnt/etc/init/hw/init.x86_64.rc" \
+    "${WORK_DIR}/vendor_mnt/etc/init/hw/init.x86.rc" \
     "${BLISS_SYS_ROOT:+${BLISS_SYS_ROOT}/etc/init/hw/init.android_x86_64.rc}" \
     "${BLISS_SYS_ROOT:+${BLISS_SYS_ROOT}/vendor/etc/init/hw/init.android_x86_64.rc}"; do
     if [ -n "${RC_CAND}" ] && [ -f "${RC_CAND}" ] && [ ! -f "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" ]; then
       cp -f "${RC_CAND}" "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
-      echo "Bridged Bliss 16.9 init.android_x86_64.rc -> vendor/etc/init/hw/"
+      echo "Bridged Bliss 16.9 $(basename "${RC_CAND}") -> vendor/etc/init/hw/init.android_x86_64.rc"
       break
     fi
   done
+
   if [ -f "/tmp/bliss_donor_meta/ueventd.android_x86_64.rc" ] && [ ! -f "${WORK_DIR}/vendor_mnt/etc/ueventd.rc" ]; then
     cp -f "/tmp/bliss_donor_meta/ueventd.android_x86_64.rc" "${WORK_DIR}/vendor_mnt/etc/ueventd.rc"
   fi
+  if [ -f "${WORK_DIR}/vendor_mnt/etc/ueventd.rc" ]; then
+    for ULINE in \
+      "/dev/dri/*                0666   root       graphics" \
+      "/dev/dma_heap/*           0666   system     graphics" \
+      "/dev/ion                  0666   system     system" \
+      "/dev/fb*                  0660   system     graphics"; do
+      NODE=$(echo "${ULINE}" | awk '{print $1}')
+      grep -qF "${NODE}" "${WORK_DIR}/vendor_mnt/etc/ueventd.rc" 2>/dev/null || echo "${ULINE}" >> "${WORK_DIR}/vendor_mnt/etc/ueventd.rc"
+    done
+  fi
+
   if [ ! -f "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" ]; then
     cat <<'EOF' > "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
 on early-init
@@ -320,11 +351,60 @@ on late-fs
     mount_all /vendor/etc/fstab.android_x86_64 --late
 
 on boot
-    setprop ro.hardware.egl mesa
-    setprop debug.hwui.renderer opengl
     setprop ro.hwui.use_vulkan false
     setprop persist.sys.usb.config adb
 EOF
+  fi
+
+  # Guarantee Bliss init.sh executes if present in system.img even under androidboot.hardware=android_x86_64
+  if [ -f "${SYS_ROOT}/etc/init.sh" ] && ! grep -q '/system/etc/init.sh' "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null; then
+    echo "Injecting Bliss /system/etc/init.sh hooks into vendor/etc/init/hw/init.android_x86_64.rc..."
+    cat <<'EOF' >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
+
+on early-init
+    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh eglsetup
+
+on post-fs
+    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh
+
+on property:sys.boot_completed=1
+    exec u:r:init:s0 -- /system/bin/logwrapper /system/bin/sh /system/etc/init.sh bootcomplete
+EOF
+  fi
+
+  # Reconcile duplicate/conflicting hwcomposer-2-1 auto-start if Bliss drmfb or 2-4 services exist
+  grep -rnE '^\s*(service |disabled|onrestart )' "${WORK_DIR}/vendor_mnt/etc/init/"*composer*.rc 2>/dev/null || true
+  COMPOSER_RC_COUNT=$(ls -1 "${WORK_DIR}/vendor_mnt/etc/init/"*composer*.rc 2>/dev/null | wc -l || echo 0)
+  if [ "${COMPOSER_RC_COUNT}" -gt 1 ]; then
+    python3 - "${WORK_DIR}/vendor_mnt/etc/init" <<'HWCPY'
+import pathlib, re, sys
+
+init_dir = pathlib.Path(sys.argv[1])
+for rc in sorted(init_dir.glob("*composer@2.*-service.rc")):
+    lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    out = []
+    in_hwc = False
+    has_disabled = False
+    changed = False
+    for line in lines:
+        stripped = line.strip()
+        is_top = bool(line) and not line[0].isspace() and not stripped.startswith("#") and stripped != ""
+        if is_top:
+            if in_hwc and not has_disabled:
+                out.append("    disabled\n")
+                changed = True
+            in_hwc = bool(re.match(r"^service\s+vendor\.hwcomposer-2-[14]\b", stripped))
+            has_disabled = False
+        elif in_hwc and stripped == "disabled":
+            has_disabled = True
+        out.append(line)
+    if in_hwc and not has_disabled:
+        out.append("    disabled\n")
+        changed = True
+    if changed:
+        rc.write_text("".join(out), encoding="utf-8")
+        print(f"Reconciled {rc.name}: marked default hwcomposer disabled (started dynamically by portable graphics hook)")
+HWCPY
   fi
   chmod 0644 "${WORK_DIR}/vendor_mnt/etc/fstab.android_x86_64" "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null || true
 
@@ -842,16 +922,135 @@ for CANDIDATE_INIT in "${WORK_DIR}/mnt/system/etc/init" "${WORK_DIR}/mnt/etc/ini
 done
 
 if [ -n "${INIT_DIR}" ]; then
-  echo "Injecting ${INIT_DIR}/init.portable_selinux.rc for Enforcing/Permissive & KernelSU Next Magic Mount..."
+  echo "Injecting ${SYS_ROOT}/etc/init.portable_graphics.sh and ${INIT_DIR}/init.portable_selinux.rc..."
+  cat <<'EOF' > "${SYS_ROOT}/etc/init.portable_graphics.sh"
+#!/system/bin/sh
+_glog() {
+  echo "[PORTABLE-GFX] $*" > /dev/kmsg 2>/dev/null || true
+}
+
+chmod 0666 /dev/dri/* /dev/dma_heap/* /dev/ion /dev/fb* 2>/dev/null || true
+FB_DRV=$(readlink /sys/class/graphics/fb0/device/driver 2>/dev/null || echo "none")
+DRI_LIST=$(ls -1 /dev/dri 2>/dev/null | tr '\n' ' ' || echo "none")
+CMDLINE=$(cat /proc/cmdline 2>/dev/null || echo "")
+
+HAS_RENDER=0
+for RN in /sys/class/drm/renderD*; do
+  [ -e "${RN}" ] || continue
+  R_DRV=$(readlink "${RN}/device/driver" 2>/dev/null || cat "${RN}/device/uevent" 2>/dev/null || echo "")
+  if echo "${R_DRV}" | grep -qiE 'virtio|i915|amdgpu|radeon|nouveau|vmwgfx'; then
+    HAS_RENDER=1
+    break
+  fi
+done
+
+REQ_HWACCEL=""
+case " ${CMDLINE} " in
+  *" HWACCEL=0 "*|*" nomodeset "*) REQ_HWACCEL=0 ;;
+  *" HWACCEL=1 "*) REQ_HWACCEL=1 ;;
+esac
+
+_glog "fb0_driver=${FB_DRV} dri=[${DRI_LIST}] 3d_render=${HAS_RENDER} cmd_hwaccel=${REQ_HWACCEL:-auto} cur_hwc=$(getprop ro.hardware.hwcomposer) cur_gralloc=$(getprop ro.hardware.gralloc) cur_egl=$(getprop ro.hardware.egl)"
+
+if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
+  if echo "${CMDLINE}" | grep -q 'MESA_LLVMPIPE=1'; then
+    setprop mesa.libgl.always.software true
+    setprop ro.hardware.egl mesa
+  elif echo "${CMDLINE}" | grep -q 'EGL=angle'; then
+    setprop ro.hardware.egl angle
+  elif [ -z "$(getprop ro.hardware.egl)" ]; then
+    setprop ro.hardware.egl angle
+  fi
+
+  # Validate ro.hardware.hwcomposer & ro.hardware.gralloc against actual /vendor/lib64/hw/*.so
+  CUR_HWC=$(getprop ro.hardware.hwcomposer)
+  if [ -z "${CUR_HWC}" ] || [ ! -f "/vendor/lib64/hw/hwcomposer.${CUR_HWC}.so" ]; then
+    for HC in drm drm_minigbm default; do
+      if [ -f "/vendor/lib64/hw/hwcomposer.${HC}.so" ]; then
+        setprop ro.hardware.hwcomposer "${HC}"
+        break
+      fi
+    done
+  fi
+  CUR_GR=$(getprop ro.hardware.gralloc)
+  if [ -z "${CUR_GR}" ] || [ ! -f "/vendor/lib64/hw/gralloc.${CUR_GR}.so" ]; then
+    for GC in gbm_noscanout gbm minigbm_gbm_mesa minigbm default; do
+      if [ -f "/vendor/lib64/hw/gralloc.${GC}.so" ]; then
+        setprop ro.hardware.gralloc "${GC}"
+        break
+      fi
+    done
+  fi
+
+  # Prefer Bliss drmfb service in 2D/SW mode if installed
+  if [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; then
+    setprop debug.sf.hwc_service_name drmfb
+    setprop portable.hwc.svc drmfb
+  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; then
+    setprop portable.hwc.svc v21
+  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; then
+    setprop portable.hwc.svc v24
+  fi
+else
+  # 3D VirGL hardware path: ensure EGL/HWC/Gralloc & composer service are active
+  [ -n "$(getprop ro.hardware.egl)" ] || setprop ro.hardware.egl mesa
+  CUR_HWC=$(getprop ro.hardware.hwcomposer)
+  if [ -z "${CUR_HWC}" ] || [ ! -f "/vendor/lib64/hw/hwcomposer.${CUR_HWC}.so" ]; then
+    for HC in drm_minigbm drm default; do
+      if [ -f "/vendor/lib64/hw/hwcomposer.${HC}.so" ]; then
+        setprop ro.hardware.hwcomposer "${HC}"
+        break
+      fi
+    done
+  fi
+  CUR_GR=$(getprop ro.hardware.gralloc)
+  if [ -z "${CUR_GR}" ] || [ ! -f "/vendor/lib64/hw/gralloc.${CUR_GR}.so" ]; then
+    for GC in minigbm_arcvm minigbm_gbm_mesa gbm minigbm default; do
+      if [ -f "/vendor/lib64/hw/gralloc.${GC}.so" ]; then
+        setprop ro.hardware.gralloc "${GC}"
+        break
+      fi
+    done
+  fi
+  if [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; then
+    setprop portable.hwc.svc v21
+  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; then
+    setprop portable.hwc.svc v24
+  fi
+fi
+_glog "final hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
+EOF
+  chmod 0755 "${SYS_ROOT}/etc/init.portable_graphics.sh"
+
   cat <<'EOF' > "${INIT_DIR}/init.portable_selinux.rc"
+on post-fs
+    chmod 0666 /dev/dri/card0
+    chmod 0666 /dev/dri/renderD128
+    chmod 0666 /dev/ion
+    chmod 0666 /dev/dma_heap/system
+    exec u:r:init:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
+
+on property:portable.hwc.svc=drmfb
+    stop vendor.hwcomposer-2-1
+    stop vendor.hwcomposer-2-4
+    start vendor.hwcomposer-2-1.drmfb
+
+on property:portable.hwc.svc=v21
+    stop vendor.hwcomposer-2-1.drmfb
+    stop vendor.hwcomposer-2-4
+    start vendor.hwcomposer-2-1
+
+on property:portable.hwc.svc=v24
+    stop vendor.hwcomposer-2-1.drmfb
+    stop vendor.hwcomposer-2-1
+    start vendor.hwcomposer-2-4
+
 on post-fs-data
     restorecon_recursive /data/adb
     restorecon_recursive /data/local/tmp
-    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; /data/adb/ksud sepolicy patch 'allow hal_graphics_composer_default * * *' 'allow surfaceflinger * * *' 'allow su * * *' 2>/dev/null || true; fi"
+    exec - root root -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; /data/adb/ksud sepolicy patch 'allow hal_graphics_composer_default * * *' 'allow hal_graphics_allocator_default * * *' 'allow surfaceflinger * * *' 'allow su * * *' 2>/dev/null || true; fi"
 
 on boot
-    setprop ro.hardware.egl mesa
-    setprop debug.hwui.renderer opengl
     setprop ro.hwui.use_vulkan false
 
 on property:sys.boot_completed=1
@@ -1001,6 +1200,7 @@ if [ -x /sbin/ksud ] && [ -d "${TARGET_ROOT}/data" ] && grep -q " ${TARGET_ROOT}
   _dp_log "KernelSU Next staged /sbin/ksud -> ${TARGET_ROOT}/data/adb/ksud (OverlayFS Magic Mount ready)"
 fi
 
+_dp_log "DRM/FB sysfs check: dri=$(ls -1 /dev/dri 2>/dev/null | tr '\n' ' ' || echo none) fb=$(ls -1 /dev/fb* 2>/dev/null | tr '\n' ' ' || echo none)"
 _dp_log "Target binary check: $(ls -l ${TARGET_ROOT}/sbin/droidport_init_wrapper ${TARGET_ROOT}/init ${TARGET_ROOT}/system/bin/init 2>&1 | tr '\n' ' ')"
 _dp_log "Active target mounts: $(grep " ${TARGET_ROOT}" /proc/mounts 2>/dev/null | tr '\n' ';' || echo none)"
 EOF
