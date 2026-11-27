@@ -161,10 +161,7 @@ jobs:
           DATA_CTX=$(cat /tmp/data_root_secontext 2>/dev/null || echo "u:object_r:system_data_root_file:s0")
           rm -rf "${DATA_MNT}" && mkdir -p "${DATA_MNT}"
           sudo mount -o loop "${RAW_DATA}" "${DATA_MNT}"
-          sudo python3 - "${DATA_MNT}" "${DATA_CTX}" <<'DATACTX'
-import os, sys
-os.setxattr(sys.argv[1], b"security.selinux", sys.argv[2].encode("utf-8") + b"\x00", follow_symlinks=False)
-DATACTX
+          sudo python3 -c 'import os, sys; os.setxattr(sys.argv[1], b"security.selinux", sys.argv[2].encode("utf-8") + b"\x00", follow_symlinks=False)' "${DATA_MNT}" "${DATA_CTX}"
           sudo sync
           sudo umount "${DATA_MNT}"
           rmdir "${DATA_MNT}"
