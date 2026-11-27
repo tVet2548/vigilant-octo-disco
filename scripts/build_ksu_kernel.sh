@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUNDLE_DIR="${1:-dist_bundle}"
+BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
 IMG_DIR="${BUNDLE_DIR}/images"
 WORK_DIR="/tmp/bliss_work"
 mkdir -p "${IMG_DIR}" "${WORK_DIR}"
