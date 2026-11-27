@@ -194,18 +194,20 @@ jobs:
             local QPID=$!
             local OK=0
             local EARLY_ABORT=0
+            local FAIL_RE='\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing|InitFatalReboot|Init encountered errors|Attempted to kill init|reboot: Restarting system'
+            local INIT_RE='init first stage started|init second stage started|Opening SELinux policy|coldboot|ueventd'
             for _ in $(seq 1 90); do
               if ! kill -0 "${QPID}" 2>/dev/null; then
                 break
               fi
-              if grep -qE '\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing' "${LOGF}" 2>/dev/null; then
+              if grep -qE "${FAIL_RE}" "${LOGF}" 2>/dev/null; then
                 EARLY_ABORT=1
                 break
               fi
               if grep -q '\[INIT-WRAPPER\] Handing off PID 1' "${LOGF}" 2>/dev/null && \
-                 grep -qE '\[ANDROID/KMSG\]|init first stage|selinux_setup|init second stage' "${LOGF}" 2>/dev/null; then
-                sleep 4
-                if ! grep -qE '\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing' "${LOGF}" 2>/dev/null; then
+                 grep -qE "${INIT_RE}" "${LOGF}" 2>/dev/null; then
+                sleep 6
+                if ! grep -qE "${FAIL_RE}" "${LOGF}" 2>/dev/null; then
                   OK=1
                 else
                   EARLY_ABORT=1

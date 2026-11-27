@@ -10,13 +10,14 @@ echo "=== [1/4] Resolving Bliss OS 16.9 (Android 13 / API 33) x86_64 ISO ==="
 ISO_URL="${BLISS_ISO_URL:-}"
 DONOR_SERIES="BlissOS16"
 if [ -z "${ISO_URL}" ]; then
-  for SF_PATH in "/Official/BlissOS16" "/Official/BlissOS16/Gapps/Generic" "/Official/BlissOS16/FOSS/Generic"; do
+  for SF_PATH in "/Official/BlissOS16/Gapps/Generic" "/Official/BlissOS16" "/Official/BlissOS16/FOSS/Generic"; do
     RSS_XML=$(curl -fsSL "https://sourceforge.net/projects/blissos-x86/rss?path=${SF_PATH}" || true)
-    ISO_URL=$(echo "${RSS_XML}" | grep -oE 'https://sourceforge\.net/projects/blissos-x86/files/Official/BlissOS16/[^"<]*Bliss[^"<]*16\.9[^"<]*x86_64[^"<]*\.iso/download' | head -n1 || true)
+    ISO_URL=$(echo "${RSS_XML}" | grep -oE 'https://sourceforge\.net/projects/blissos-x86/files/Official/BlissOS16/[^"<]*Bliss[^"<]*16\.9[^"<]*x86_64[^"<]*\.iso/download' | grep -ivE '(/FOSS/|foss-)' | sort -uV | tail -n1 || true)
     if [ -z "${ISO_URL}" ]; then
-      ISO_URL=$(echo "${RSS_XML}" | grep -oE 'https://sourceforge\.net/projects/blissos-x86/files/Official/BlissOS16/[^"<]*x86_64[^"<]*\.iso/download' | head -n1 || true)
+      ISO_URL=$(echo "${RSS_XML}" | grep -oE 'https://sourceforge\.net/projects/blissos-x86/files/Official/BlissOS16/[^"<]*x86_64[^"<]*\.iso/download' | sort -uV | tail -n1 || true)
     fi
     if [ -n "${ISO_URL}" ]; then
+      DONOR_SERIES="BlissOS16 (${SF_PATH})"
       break
     fi
   done
@@ -54,11 +55,37 @@ if [ -f "${WORK_DIR}/iso_mnt/vendor.img" ]; then
   cp -f "${WORK_DIR}/iso_mnt/vendor.img" "${RAW_VENDOR}"
 elif [ -f "${WORK_DIR}/iso_mnt/vendor.efs" ]; then
   mkdir -p "${WORK_DIR}/vefs_mnt"
-  mount -t erofs -o loop,ro "${WORK_DIR}/iso_mnt/vendor.efs" "${WORK_DIR}/vefs_mnt"
-  if [ -f "${WORK_DIR}/vefs_mnt/vendor.img" ]; then
-    cp -f "${WORK_DIR}/vefs_mnt/vendor.img" "${RAW_VENDOR}"
+  if mount -t erofs -o loop,ro "${WORK_DIR}/iso_mnt/vendor.efs" "${WORK_DIR}/vefs_mnt" 2>/dev/null; then
+    if [ -f "${WORK_DIR}/vefs_mnt/vendor.img" ]; then
+      cp -f "${WORK_DIR}/vefs_mnt/vendor.img" "${RAW_VENDOR}"
+    elif [ -d "${WORK_DIR}/vefs_mnt/lib64" ] || [ -f "${WORK_DIR}/vefs_mnt/build.prop" ]; then
+      V_MB=$(du -sm "${WORK_DIR}/vefs_mnt" | awk '{print $1 + 128}')
+      dd if=/dev/zero of="${RAW_VENDOR}" bs=1M count="${V_MB}" status=none
+      mkfs.ext4 -F -L vendor "${RAW_VENDOR}" >/dev/null
+      mkdir -p "${WORK_DIR}/vendor_ext_tmp"
+      mount -o loop "${RAW_VENDOR}" "${WORK_DIR}/vendor_ext_tmp"
+      cp -a "${WORK_DIR}/vefs_mnt/." "${WORK_DIR}/vendor_ext_tmp/"
+      sync
+      umount "${WORK_DIR}/vendor_ext_tmp"
+    fi
+    umount "${WORK_DIR}/vefs_mnt"
+  else
+    rm -rf "${WORK_DIR}/vendor_erofs_out"
+    fsck.erofs --extract="${WORK_DIR}/vendor_erofs_out" "${WORK_DIR}/iso_mnt/vendor.efs"
+    if [ -f "${WORK_DIR}/vendor_erofs_out/vendor.img" ]; then
+      mv -f "${WORK_DIR}/vendor_erofs_out/vendor.img" "${RAW_VENDOR}"
+    elif [ -d "${WORK_DIR}/vendor_erofs_out" ]; then
+      V_MB=$(du -sm "${WORK_DIR}/vendor_erofs_out" | awk '{print $1 + 128}')
+      dd if=/dev/zero of="${RAW_VENDOR}" bs=1M count="${V_MB}" status=none
+      mkfs.ext4 -F -L vendor "${RAW_VENDOR}" >/dev/null
+      mkdir -p "${WORK_DIR}/vendor_ext_tmp"
+      mount -o loop "${RAW_VENDOR}" "${WORK_DIR}/vendor_ext_tmp"
+      cp -a "${WORK_DIR}/vendor_erofs_out/." "${WORK_DIR}/vendor_ext_tmp/"
+      sync
+      umount "${WORK_DIR}/vendor_ext_tmp"
+    fi
+    rm -rf "${WORK_DIR}/vendor_erofs_out"
   fi
-  umount "${WORK_DIR}/vefs_mnt"
 elif [ -f "${WORK_DIR}/iso_mnt/vendor.sfs" ]; then
   unsquashfs -d "${WORK_DIR}/vsfs_out" "${WORK_DIR}/iso_mnt/vendor.sfs" "vendor.img" || true
   [ -f "${WORK_DIR}/vsfs_out/vendor.img" ] && mv "${WORK_DIR}/vsfs_out/vendor.img" "${RAW_VENDOR}"
@@ -66,11 +93,16 @@ fi
 
 if [ -f "${WORK_DIR}/iso_mnt/system.efs" ]; then
   mkdir -p "${WORK_DIR}/efs_mnt"
-  mount -t erofs -o loop,ro "${WORK_DIR}/iso_mnt/system.efs" "${WORK_DIR}/efs_mnt"
-  if [ -f "${WORK_DIR}/efs_mnt/system.img" ]; then
-    cp -f "${WORK_DIR}/efs_mnt/system.img" "${WORK_DIR}/bliss_system_fallback.img"
+  if mount -t erofs -o loop,ro "${WORK_DIR}/iso_mnt/system.efs" "${WORK_DIR}/efs_mnt" 2>/dev/null; then
+    if [ -f "${WORK_DIR}/efs_mnt/system.img" ]; then
+      cp -f "${WORK_DIR}/efs_mnt/system.img" "${WORK_DIR}/bliss_system_fallback.img"
+    else
+      cp -f "${WORK_DIR}/iso_mnt/system.efs" "${WORK_DIR}/bliss_system_fallback.img"
+    fi
+    umount "${WORK_DIR}/efs_mnt"
+  else
+    cp -f "${WORK_DIR}/iso_mnt/system.efs" "${WORK_DIR}/bliss_system_fallback.img"
   fi
-  umount "${WORK_DIR}/efs_mnt"
 elif [ -f "${WORK_DIR}/iso_mnt/system.sfs" ]; then
   unsquashfs -d "${WORK_DIR}/sfs_out" "${WORK_DIR}/iso_mnt/system.sfs" "system.img"
   mv "${WORK_DIR}/sfs_out/system.img" "${WORK_DIR}/bliss_system_fallback.img"
@@ -295,7 +327,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       --disable CONFIG_MODULE_SIG \
       --disable CONFIG_WERROR \
       --disable CONFIG_KSU_SUSFS \
-      --disable CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER \
+      --enable CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER \
       --disable CONFIG_DEBUG_INFO \
       --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
       --disable CONFIG_DEBUG_INFO_BTF \
@@ -563,8 +595,9 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
 
     yes "" | make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig >/dev/null 2>&1 || make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig
     echo "Verified critical kernel symbols (${MODE}):"
-    grep -E 'CONFIG_(CC_IS_CLANG|LD_IS_LLD|KSU|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|EFI_STUB|PARAVIRT|GENERIC_CPU|KERNEL_GZIP|BPF_SYSCALL|CGROUP_BPF|PSI|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|DEVTMPFS)' .config | head -n 90 || true
+    grep -E 'CONFIG_(CC_IS_CLANG|LD_IS_LLD|KSU|KSU_X86_PATCH_SYSCALL_DISPATCHER|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|EFI_STUB|PARAVIRT|GENERIC_CPU|KERNEL_GZIP|BPF_SYSCALL|CGROUP_BPF|PSI|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|DRM_VIRTIO_GPU|ANDROID_BINDER|DEVTMPFS)' .config | head -n 90 || true
     grep -q '^CONFIG_KSU=y' .config
+    grep -q '^CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y' .config
     grep -q '^CONFIG_OVERLAY_FS=y' .config
     grep -q '^CONFIG_VIRTIO_BLK=y' .config
     grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' .config

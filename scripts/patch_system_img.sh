@@ -17,14 +17,14 @@ RAW_SYS="${WORK_DIR}/system_raw.img"
 GSI_URL="${LINEAGE_GSI_URL:-}"
 GSI_SOURCE_LABEL="User Override"
 
-echo "=== [1/5] Acquiring LineageOS 20.0 x86_64 GApps (bgN) System Image ==="
+echo "=== [1/5] Acquiring VM-Bootable Android 13 (API 33) x86_64 GApps System Image ==="
 if [ -z "${GSI_URL}" ]; then
-  # 1) Check AndyYan LineageOS 20 GSI SourceForge RSS strictly for x86_64 + GApps (bgN/bgS/gapps, NO bvN/arm64)
+  # 1) Check AndyYan LineageOS 20 GSI SourceForge RSS strictly for genuine x86_64 + GApps (NO arm64/vanilla/waydroid-LXC)
   for SF_DIR in "/lineage-20-td" "/lineage-20-light" "/lineage-20"; do
     SF_XML=$(curl -fsSL "https://sourceforge.net/projects/andyyan-gsi/rss?path=${SF_DIR}" 2>/dev/null || true)
     CANDIDATE=$(echo "${SF_XML}" | grep -oE 'https://sourceforge\.net/projects/andyyan-gsi/files/[^"<]+\.(img\.xz|img\.gz|zip|7z|img)/download' | \
       grep -iE 'lineage[-_]?20' | grep -iE 'x86_64' | grep -iE '(_bgN|_bgS|_gN|_gS|gapps)' | \
-      grep -ivE '(arm64|a64|arm32|bvN|bvS|vanilla)' | head -n1 || true)
+      grep -ivE '(arm64|a64|arm32|bvN|bvS|vanilla|waydroid)' | head -n1 || true)
     if [ -n "${CANDIDATE}" ]; then
       GSI_URL="${CANDIDATE}"
       GSI_SOURCE_LABEL="AndyYan GSI (${SF_DIR})"
@@ -34,27 +34,16 @@ if [ -z "${GSI_URL}" ]; then
 fi
 
 if [ -z "${GSI_URL}" ]; then
-  # 2) Check GitHub GSI releases strictly matching LineageOS 20 + x86_64 + GApps (bgN/bgS/gapps)
-  for REPO in "AndyYan/lineage_build_config" "MisterZtr/LineageOS_gsi" "TrebleDroid/treble_experimentations" "supechicken/waydroid-builds"; do
+  # 2) Check GitHub Treble/GSI releases strictly matching non-Waydroid Android 13 x86_64 GApps
+  for REPO in "AndyYan/lineage_build_config" "MisterZtr/LineageOS_gsi" "TrebleDroid/treble_experimentations"; do
     CANDIDATE=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=15" 2>/dev/null | \
-      jq -r '.[].assets[] | select((.name | test("(lineage[-_]?20|android[-_]?13)"; "i")) and (.name | test("x86_64"; "i")) and (.name | test("(bgN|bgS|gapps)"; "i")) and (.name | test("(arm64|a64|arm32|bvN|bvS|vanilla)"; "i") | not) and (.name | test("\\.(img\\.xz|img\\.gz|zip|7z|img)$"; "i"))) | .browser_download_url' | head -n1 || true)
+      jq -r '.[].assets[] | select((.name | test("(lineage[-_]?20|android[-_]?13)"; "i")) and (.name | test("x86_64"; "i")) and (.name | test("(bgN|bgS|gapps)"; "i")) and (.name | test("(arm64|a64|arm32|bvN|bvS|vanilla|waydroid)"; "i") | not) and (.name | test("\\.(img\\.xz|img\\.gz|zip|7z|img)$"; "i"))) | .browser_download_url' | head -n1 || true)
     if [ -n "${CANDIDATE}" ] && [ "${CANDIDATE}" != "null" ]; then
       GSI_URL="${CANDIDATE}"
       GSI_SOURCE_LABEL="GitHub ${REPO}"
       break
     fi
   done
-fi
-
-if [ -z "${GSI_URL}" ]; then
-  # 3) Check official Waydroid LineageOS 20.0 x86_64 GAPPS SourceForge feed (verified API 33 x86_64 GApps)
-  WD_XML=$(curl -fsSL "https://sourceforge.net/projects/waydroid/rss?path=/images/system/lineage/waydroid_x86_64" 2>/dev/null || true)
-  CANDIDATE=$(echo "${WD_XML}" | grep -oE 'https://sourceforge\.net/projects/waydroid/files/images/system/lineage/waydroid_x86_64/lineage-20\.0[^"<]*GAPPS[^"<]*\.zip/download' | \
-    grep -ivE '(arm64|a64|VANILLA)' | head -n1 || true)
-  if [ -n "${CANDIDATE}" ]; then
-    GSI_URL="${CANDIDATE}"
-    GSI_SOURCE_LABEL="Waydroid LineageOS 20.0 x86_64 GAPPS"
-  fi
 fi
 
 if [ -n "${GSI_URL}" ]; then
@@ -98,7 +87,7 @@ if [ -f "${WORK_DIR}/lineage20_dl" ]; then
     mv "${WORK_DIR}/lineage20_dl" "${RAW_SYS}"
   fi
 elif [ -f "/tmp/bliss_system_fallback.img" ]; then
-  echo "Notice: Upstream LineageOS 20.0 x86_64 GApps mirror unavailable; using verified Bliss OS 16.9 (API 33) x86_64 system.img fallback."
+  echo "Notice: Using genuine VM-bootable Bliss OS 16.9 (Android 13 / API 33) x86_64 GApps system.img."
   cp -f "/tmp/bliss_system_fallback.img" "${RAW_SYS}"
 else
   echo "ERROR: No valid Android 13 (API 33) x86_64 system.img source available." >&2
@@ -180,6 +169,13 @@ SYS_REL=$(grep -E '^ro\.build\.version\.release=' "${PROP_FILE}" | head -n1 | cu
 echo "Detected system.img Android version=${SYS_REL:-unknown}, SDK API=${SYS_SDK:-unknown}"
 if [ -n "${SYS_SDK}" ] && [ "${SYS_SDK}" != "33" ]; then
   echo "WARNING: Expected API 33 (Android 13) for 1:1 Bliss OS 16.9 parity, detected API ${SYS_SDK}." >&2
+fi
+
+if [ -z "${LINEAGE_GSI_URL:-}" ]; then
+  if [ -f "${SYS_ROOT}/etc/init/waydroid.rc" ] || grep -qiE 'waydroid' "${PROP_FILE}" 2>/dev/null; then
+    echo "ERROR: Rejected Waydroid LXC-container system.img (its /system/bin/init omits /proc, /dev, ueventd, and binderfs mounts and cannot boot a real QEMU VM)." >&2
+    exit 1
+  fi
 fi
 
 GAPPS_LIST=$(find "${WORK_DIR}/mnt" -maxdepth 6 \( -iname "*Phonesky*.apk" -o -iname "*GmsCore*.apk" -o -iname "*GoogleServicesFramework*.apk" \) 2>/dev/null || true)
@@ -278,9 +274,21 @@ printf '%s' "${FSTAB_CONTENT}" > "${SYS_ROOT}/etc/fstab.android_x86_64"
 printf '%s' "${FSTAB_CONTENT}" > "${WORK_DIR}/mnt/first_stage_ramdisk/fstab.android_x86_64"
 chmod 0644 "${WORK_DIR}/mnt/fstab.android_x86_64" "${SYS_ROOT}/etc/fstab.android_x86_64" "${WORK_DIR}/mnt/first_stage_ramdisk/fstab.android_x86_64" 2>/dev/null || true
 
+# Ensure no stray first_stage_mount entries remain in first_stage_ramdisk fstab files
+for FSTAB_EXTRA in "${WORK_DIR}/mnt/first_stage_ramdisk"/fstab.*; do
+  [ -f "${FSTAB_EXTRA}" ] || continue
+  sed -i '/first_stage_mount/d' "${FSTAB_EXTRA}" 2>/dev/null || true
+done
+
 if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
   mkdir -p "${WORK_DIR}/vendor_mnt/etc/init/hw"
   printf '%s' "${FSTAB_CONTENT}" > "${WORK_DIR}/vendor_mnt/etc/fstab.android_x86_64"
+  for V_FSTAB in "${WORK_DIR}/vendor_mnt/etc"/fstab.*; do
+    [ -f "${V_FSTAB}" ] || continue
+    if [ "$(basename "${V_FSTAB}")" != "fstab.android_x86_64" ]; then
+      sed -i '/first_stage_mount/d' "${V_FSTAB}" 2>/dev/null || true
+    fi
+  done
   for RC_CAND in \
     "/tmp/bliss_donor_meta/init.android_x86_64.rc" \
     "${WORK_DIR}/bliss_mnt/init.android_x86_64.rc" \
