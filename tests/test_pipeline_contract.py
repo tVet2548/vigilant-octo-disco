@@ -81,12 +81,21 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
 
     def test_android_boot_keeps_early_uart_logging_without_framework_console(self):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
+        launcher = self.read("src/launcher.py")
         self.assertIn("earlycon=uart8250,io,0x3f8,115200", smoke)
         self.assertIn("earlyprintk=serial,ttyS0,115200,keep", smoke)
-        self.assertNotIn("console=ttyS0", smoke)
         self.assertIn("androidboot.console=null", smoke)
-        self.assertNotIn("androidboot.console=ttyS0", smoke)
-        self.assertNotIn("SERIAL=ttyS0", smoke)
+        self.assertIn("androidboot.console=null", launcher)
+        self.assertNotIn("console=ttyS0", smoke)
+        self.assertNotIn("console=tty0", launcher)
+        self.assertNotIn("androidboot.console=ttyS0", smoke + launcher)
+        self.assertNotIn("SERIAL=ttyS0", smoke + launcher)
+
+    def test_surfaceflinger_ioctl_policy_matches_only_observed_drm_commands(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn('add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")', patch)
+        self.assertIn('add_plat_allowxperm("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x6443")', patch)
+        self.assertNotIn('add_plat_allowxperm("surfaceflinger", "device"', patch)
 
     def test_ci_logcat_service_has_valid_selinux_domain_and_socket_access(self):
         patch = self.read("scripts/patch_system_img.sh")
