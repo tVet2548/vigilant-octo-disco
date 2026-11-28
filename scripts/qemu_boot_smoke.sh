@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
-DIAG_DIR="$(realpath -m "${2:-${RUNNER_TEMP:-/tmp}/qemu-android-diagnostics}")"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 ADB_BIN="${ADB_BIN:-adb}"
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-900}"
@@ -25,7 +23,11 @@ if [[ "${1:-}" == "--self-test" ]]; then
     exit 0
 fi
 
+BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
+DIAG_DIR="$(realpath -m "${2:-${RUNNER_TEMP:-/tmp}/qemu-android-diagnostics}")"
+
 mkdir -p "$DIAG_DIR"
+
 test -s "$BUNDLE_DIR/images/system.img"
 test -s "$BUNDLE_DIR/images/vendor.img"
 test -s "$BUNDLE_DIR/images/data.img"
