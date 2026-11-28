@@ -104,7 +104,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('"exported_config_prop"', patch)
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         self.assertIn('2>&1 | while IFS= read -r line', mirror)
-        self.assertIn('logcat stream ended (exit=$?); retrying in 2 seconds', mirror)
+        self.assertIn('logcat stream ended; exit=$logcat_status; retrying in 2 seconds', mirror)
         self.assertIn('[ -S /dev/socket/logdr ]', mirror)
 
     def test_bliss_init_and_ksu_hooks_do_not_run_in_graphics_domain(self):
