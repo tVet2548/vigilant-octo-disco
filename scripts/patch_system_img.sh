@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
 IMG_DIR="${BUNDLE_DIR}/images"
 WORK_DIR="/tmp/lineage_work"
@@ -169,7 +170,13 @@ fi
 
 SYS_SDK=$(grep -E '^ro\.build\.version\.sdk=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
 SYS_REL=$(grep -E '^ro\.build\.version\.release=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
-echo "Detected system.img Android version=${SYS_REL:-unknown}, SDK API=${SYS_SDK:-unknown}"
+SYS_BUILD_TYPE=$(grep -E '^ro\.build\.type=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
+PORTABLE_PRIV_SECLABEL=""
+case "${SYS_BUILD_TYPE}" in
+  userdebug|eng) PORTABLE_PRIV_SECLABEL="u:r:su:s0" ;;
+  *) echo "WARNING: ro.build.type=${SYS_BUILD_TYPE:-unknown}; privileged Bliss init.sh hooks will be skipped (su domain is only enabled on userdebug/eng)." >&2 ;;
+esac
+echo "Detected system.img Android version=${SYS_REL:-unknown}, SDK API=${SYS_SDK:-unknown}, build type=${SYS_BUILD_TYPE:-unknown}, privileged domain=${PORTABLE_PRIV_SECLABEL:-disabled}"
 if [ -n "${SYS_SDK}" ] && [ "${SYS_SDK}" != "33" ]; then
   echo "WARNING: Expected API 33 (Android 13) for 1:1 Bliss OS 16.9 parity, detected API ${SYS_SDK}." >&2
 fi
@@ -201,6 +208,9 @@ sed -i '/^ro\.opengles\.version=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist64=/d' "${PROP_FILE}"
 sed -i '/^ro\.dalvik\.vm\.native\.bridge=/d' "${PROP_FILE}"
+sed -i '/^ro\.adb\.secure=/d' "${PROP_FILE}"
+sed -i '/^ro\.debuggable=/d' "${PROP_FILE}"
+sed -i '/^persist\.adb\.tcp\.port=/d' "${PROP_FILE}"
 
 cat <<'EOF' >> "${PROP_FILE}"
 
@@ -213,6 +223,11 @@ ro.opengles.version=196608
 ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
 ro.product.cpu.abilist64=x86_64,arm64-v8a
 ro.dalvik.vm.native.bridge=libndk_translation.so
+
+# CI-only ADB TCP diagnostics: loopback hostfwd is the only exposed transport.
+ro.debuggable=1
+ro.adb.secure=0
+persist.adb.tcp.port=5555
 EOF
 
 # Ensure all required Android root directories, real /sbin dir, and /init symlink exist
@@ -248,6 +263,27 @@ if [ -s "/tmp/bliss_system_fallback.img" ]; then
       BLISS_SYS_ROOT="${WORK_DIR}/bliss_mnt"
     fi
     echo "Mounted Bliss OS 16.9 fallback reference (BLISS_SYS_ROOT=${BLISS_SYS_ROOT})"
+  fi
+fi
+
+# Android 13 netd's initial firewall transaction contains the xt_bpf match.
+# The Lineage GSI's iptables-restore reports "Couldn't find match bpf" when
+# its Bionic xtables plugin is absent. Reuse the API-33 x86_64 donor plugin
+# from the already extracted Bliss system image, preserving its xtables path.
+if [ -n "${BLISS_SYS_ROOT}" ]; then
+  BLISS_XT_BPF=$(find "${BLISS_SYS_ROOT}" -type f -name "libxt_bpf.so" -print -quit 2>/dev/null || true)
+  if [ -n "${BLISS_XT_BPF}" ]; then
+    XT_BPF_REL="${BLISS_XT_BPF#${BLISS_SYS_ROOT}/}"
+    TARGET_XT_BPF="${SYS_ROOT}/${XT_BPF_REL}"
+    mkdir -p "$(dirname "${TARGET_XT_BPF}")"
+    if [ ! -s "${TARGET_XT_BPF}" ]; then
+      cp -p "${BLISS_XT_BPF}" "${TARGET_XT_BPF}"
+      echo "Installed missing Android xt_bpf userspace match: ${XT_BPF_REL}"
+    else
+      echo "Lineage already provides xt_bpf userspace match: ${XT_BPF_REL}"
+    fi
+  else
+    echo "WARNING: Bliss donor has no libxt_bpf.so; kernel xt_bpf support will still be enabled and verified."
   fi
 fi
 
@@ -362,10 +398,11 @@ EOF
   fi
 
   # Sanitize vendor/etc/init/hw/init.android_x86_64.rc for native Enforcing + clean graphics sequencing
-  python3 - "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" <<'RCPY'
+  python3 - "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" "${PORTABLE_PRIV_SECLABEL}" <<'RCPY'
 import pathlib, re, sys
 
 rc = pathlib.Path(sys.argv[1])
+priv_domain = sys.argv[2]
 if not rc.exists():
     sys.exit(0)
 lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
@@ -385,20 +422,24 @@ for line in lines:
         indent = line[:len(line) - len(line.lstrip())]
         out.append(f"{indent}mount_all /vendor/etc/fstab.android_x86_64 --late\n")
         continue
-    # Transition init.sh invocations into droidport_gfx domain (never u:r:init:s0 execute_no_trans)
+    # Bliss init.sh performs privileged mount/module setup; never run it inside
+    # the constrained graphics helper domain. AOSP exposes u:r:su:s0 on userdebug/eng.
     if "/system/etc/init.sh" in s and not s.startswith("#"):
         if "eglsetup" in s:
             out.append("# handled by init.portable_graphics.sh: " + line)
             continue
-        fixed = re.sub(r"exec\s+(?:u:r:init:s0|-)\s+--\s+(?:/system/bin/logwrapper\s+)?", "exec u:r:droidport_gfx:s0 -- ", line)
-        out.append(fixed)
+        if not priv_domain:
+            out.append("# disabled: Bliss init.sh needs AOSP su domain on userdebug/eng: " + line)
+        else:
+            fixed = re.sub(r"exec\s+(?:u:r:[^\s]+|-)\s+--\s+(?:/system/bin/logwrapper\s+)?", f"exec {priv_domain} -- ", line)
+            out.append(fixed)
         continue
     out.append(line)
 rc.write_text("".join(out), encoding="utf-8")
 print(f"Sanitized {rc} for native Enforcing & single-composer sequencing.")
 RCPY
 
-  # Guarantee Bliss init.sh executes cleanly in u:r:droidport_gfx:s0 if not already hooked, and streamline slow loop scans
+  # Patch Bliss init.sh graphics-property defaults; execute its privileged hooks only in AOSP su domain.
   if [ -f "${SYS_ROOT}/etc/init.sh" ]; then
     python3 - "${SYS_ROOT}/etc/init.sh" <<'INITSHPY'
 import pathlib, re, sys
@@ -429,15 +470,19 @@ if "droidport_fast_patch" not in txt:
     print("Patched /system/etc/init.sh to preserve portable graphics properties.")
 INITSHPY
     if ! grep -q '/system/etc/init.sh' "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null; then
-      echo "Injecting Bliss /system/etc/init.sh hooks into vendor/etc/init/hw/init.android_x86_64.rc..."
-      cat <<'EOF' >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
+      if [ -n "${PORTABLE_PRIV_SECLABEL}" ]; then
+        echo "Injecting Bliss /system/etc/init.sh hooks under ${PORTABLE_PRIV_SECLABEL}..."
+        cat <<EOF >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
 
 on post-fs
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh
+    exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh
 
 on property:sys.boot_completed=1
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh bootcomplete
+    exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh bootcomplete
 EOF
+      else
+        echo "Skipping Bliss init.sh hooks: image build type has no AOSP su domain."
+      fi
     fi
   fi
 
@@ -680,6 +725,12 @@ def add_plat_allow(src, tgt, cls, perms):
     if src in plat_types and (tgt in plat_types or tgt == "self") and cls in declared_classes:
         plat_rules.append(f"(allow {src} {tgt} ({cls} ({perms})))")
 
+def add_plat_allowx(src, tgt, cls, commands):
+    # CIL uses allowx (not the TE allowxperm spelling); require the base ioctl
+    # allow and whitelist only the command values observed in the AVC records.
+    if src in plat_types and tgt in plat_types and cls in declared_classes:
+        plat_rules.append(f"(allowx {src} {tgt} (ioctl {cls} ({commands})))")
+
 # Dedicated droidport_gfx domain for init.portable_graphics.sh & init.sh (avoids init execute_no_trans!)
 if "droidport_gfx" not in declared_types:
     plat_rules.extend([
@@ -723,20 +774,49 @@ for cls, perms in [
 
 for dev_t in ["dri_device", "gpu_device", "graphics_device", "ion_device", "dmabuf_system_heap_device", "kmsg_device", "device", "null_device", "zero_device"]:
     add_plat_allow("droidport_gfx", dev_t, "chr_file", "read write open getattr setattr ioctl map")
+# stdio_to_kmsg redirects the mirror service to this dedicated node. Keep the
+# permission scoped to droidport_gfx; do not grant kmsg_debug to every domain.
+add_plat_allow("droidport_gfx", "kmsg_debug_device", "chr_file", "write open getattr")
 
-add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin")
+add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin mknod")
+add_plat_allow("droidport_gfx", "file_contexts_file", "file", "read open getattr map")
 add_plat_allow("droidport_gfx", "property_socket", "sock_file", "write")
 add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "init", "fd", "use")
 add_plat_allow("droidport_gfx", "devpts", "chr_file", "read write getattr ioctl")
 add_plat_allow("droidport_gfx", "kernel", "fd", "use")
-for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop"]:
+for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop", "exported_config_prop", "exported_default_prop", "debug_prop", "ctl_start_prop"]:
     add_plat_allow("droidport_gfx", prop_t, "property_service", "set")
     add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
+
+# Graphics allocator reads standard display/allocator properties and device topology.
+# Renderer/GBM and DRM ioctls execute in platform surfaceflinger domain.
+for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
+    add_plat_allow(_sf_domain, "gpu_device", "chr_file", "read write open getattr ioctl map")
+    add_plat_allow(_sf_domain, "graphics_device", "chr_file", "read write open getattr ioctl map")
+    add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
+# Grant only DRM ioctls observed in the QEMU serial AVCs, not the whole ioctl space.
+# 0x642e is issued against renderD128 by Mesa EGL; 0x64a0 against card0 by SurfaceFlinger.
+add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")
+add_plat_allowx("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")
+
+# Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
+add_plat_allow("hal_graphics_allocator_default", "device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "tty_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "gpu_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "graphics_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "dri_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "default_prop", "file", "read open getattr map")
+add_plat_allow("hal_graphics_allocator_default", "system_prop", "file", "read open getattr map")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "dir", "read open getattr search")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "file", "read open getattr")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "lnk_file", "read getattr")
 
 # SurfaceFlinger & BootAnimation DRM/GPU/tty0/sysfs/prop permissions
 add_plat_allow("surfaceflinger", "gpu_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "tty_device", "chr_file", "read write open getattr ioctl")
+# tty0 is the Android init default-console leak; androidboot.console=null
+# removes the dependency instead of granting SurfaceFlinger VT ioctls.
 add_plat_allow("surfaceflinger", "graphics_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "device", "chr_file", "read write open getattr ioctl")
 add_plat_allow("surfaceflinger", "sysfs", "dir", "read open getattr search")
@@ -777,6 +857,15 @@ add_plat_allow("toolbox", "logcat_exec", "file", "read open getattr execute exec
 add_plat_allow("toolbox", "toolbox_exec", "file", "read open getattr execute execute_no_trans map")
 add_plat_allow("toolbox", "logdr_socket", "sock_file", "write")
 add_plat_allow("toolbox", "logd", "unix_stream_socket", "connectto")
+add_plat_allow("droidport_gfx", "logcat_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("droidport_gfx", "logd", "process", "sigchld")
+add_plat_allow("droidport_gfx", "logd", "fd", "use")
+add_plat_allow("droidport_gfx", "logd", "dir", "search getattr")
+add_plat_allow("droidport_gfx", "logd", "file", "read open getattr map")
+add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")
+add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
+add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")
+add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "property_socket", "sock_file", "write")
 add_plat_allow("toolbox", "init", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "unlabeled", "dir", "read open getattr search")
@@ -805,17 +894,34 @@ if ven_cil_path.is_file():
 
     add_ven_allow(("hal_graphics_composer_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_composer_default",), "self", "netlink_kobject_uevent_socket", "create bind read write getattr getopt setopt")
-    add_ven_allow(("hal_graphics_composer_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("hal_graphics_composer_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_composer_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_composer_default",), (f"tty_device_{plat_ver.replace('.', '_')}", "tty_device"), "chr_file", "read write open getattr ioctl")
     add_ven_allow(("hal_graphics_composer_default",), ("gpu_device", f"gpu_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_composer_default",), ("graphics_device", f"graphics_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+    # drm-hotplug uses NETLINK_KOBJECT_UEVENT and requires CAP_NET_ADMIN; without
+    # this vendor-domain permission it emits tens of thousands of AVCs and starves audit.
+    add_ven_allow(("hal_graphics_composer_default",), "self", "capability", "net_admin")
+
+    # These graphics allocator rules must live in vendor policy: the allocator
+    # type belongs to the vendor policy namespace, so plat-only allows are dropped.
+    add_ven_allow(("surfaceflinger", f"surfaceflinger_{plat_ver.replace('.', '_')}"), (f"gpu_device_{plat_ver.replace('.', '_')}", "gpu_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("surfaceflinger", f"surfaceflinger_{plat_ver.replace('.', '_')}"), (f"graphics_device_{plat_ver.replace('.', '_')}", "graphics_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"system_prop_{plat_ver.replace('.', '_')}", "system_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"gpu_device_{plat_ver.replace('.', '_')}", "gpu_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"graphics_device_{plat_ver.replace('.', '_')}", "graphics_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"device_{plat_ver.replace('.', '_')}", "device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"tty_device_{plat_ver.replace('.', '_')}", "tty_device"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "dir", "read open getattr search")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "file", "read open getattr")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "lnk_file", "read getattr")
 
     add_ven_allow(("hal_gnss_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
-    add_ven_allow(("hal_light_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search")
-    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "file", "read open getattr")
-    add_ven_allow(("hal_audio_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("vendor_init",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("hal_light_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_light_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "dir", "read open getattr search")
+    add_ven_allow(("hal_light_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "file", "read open getattr")
+    add_ven_allow(("hal_audio_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("vendor_init",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
     add_ven_allow(("vendor_init",), ("config_prop", f"config_prop_{plat_ver.replace('.', '_')}"), "property_service", "set")
     add_ven_allow(("vendor_init",), ("dhcp_data_file", f"dhcp_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
     add_ven_allow(("vendor_init",), ("system_data_file", f"system_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
@@ -1419,6 +1525,10 @@ esac
 _glog "fb0_driver=${FB_DRV} dri=[${DRI_LIST}] 3d_render=${HAS_RENDER} cmd_hwaccel=${REQ_HWACCEL:-auto} cur_hwc=$(getprop ro.hardware.hwcomposer) cur_gralloc=$(getprop ro.hardware.gralloc) cur_egl=$(getprop ro.hardware.egl)"
 
 if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
+  # The API-33 SkiaGL cache priming path crashes in the Bliss Mesa EGL stack
+  # while importing AHardwareBuffer on software-rendered QEMU. GLES is the
+  # supported AOSP RenderEngine override and avoids the SkiaGL prime-cache path.
+  setprop debug.renderengine.backend gles
   if echo "${CMDLINE}" | grep -q 'MESA_LLVMPIPE=1'; then
     setprop mesa.libgl.always.software true
     setprop ro.hardware.egl mesa
@@ -1448,14 +1558,44 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
     done
   fi
 
-  # Prefer Bliss drmfb service in 2D/SW mode if installed, otherwise single active composer
-  if [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; then
-    setprop debug.sf.hwc_service_name drmfb
+  # DRM fbdev emulation may publish fb0 in sysfs before ueventd has created
+  # the devtmpfs node. Materialize the node from the kernel's authoritative
+  # major:minor value rather than silently falling back to a different HWC.
+  FB_DEV_NUMBER=""
+  if [ -r /sys/class/graphics/fb0/dev ]; then
+    FB_DEV_NUMBER=$(cat /sys/class/graphics/fb0/dev 2>/dev/null || true)
+  fi
+  if [ -n "$FB_DEV_NUMBER" ] && [ ! -c /dev/fb0 ]; then
+    FB_MAJOR=${FB_DEV_NUMBER%:*}
+    FB_MINOR=${FB_DEV_NUMBER#*:}
+    case "$FB_MAJOR:$FB_MINOR" in *[!0-9:]*|:*) _glog "WARN: invalid fb0 dev number '$FB_DEV_NUMBER'" ;; *)
+      mknod /dev/fb0 c "$FB_MAJOR" "$FB_MINOR" 2>/dev/null || true
+      chmod 0660 /dev/fb0 2>/dev/null || true
+      chown system:graphics /dev/fb0 2>/dev/null || true
+      restorecon /dev/fb0 2>/dev/null || true
+      ;;
+    esac
+  fi
+
+  # drmfb requires the actual fb0 character node, not merely its sysfs directory.
+  # The DRM composer path requires an actual DRM card node.
+  HAS_FB=0
+  [ -c /dev/fb0 ] && HAS_FB=1
+  HAS_DRI=0
+  [ -c /dev/dri/card0 ] && HAS_DRI=1
+  _glog "software_display fb0_node=${HAS_FB} fb0_dev=${FB_DEV_NUMBER:-none} dri_card_node=${HAS_DRI} fb0_driver=${FB_DRV}"
+
+  if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; }; then
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc drmfb
-  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; then
+  elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; }; then
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc v21
-  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; then
+  elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; }; then
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc v24
+  else
+    _glog "ERROR: no usable framebuffer or DRM card node; refusing to start a broken HWC service"
   fi
 else
   # 3D VirGL hardware path: ensure EGL/HWC/Gralloc & composer service are active
@@ -1484,9 +1624,11 @@ else
     setprop portable.hwc.svc v24
   fi
 fi
-_glog "final hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
+_glog "final renderengine=$(getprop debug.renderengine.backend) hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
 EOF
   chmod 0755 "${SYS_ROOT}/etc/init.portable_graphics.sh"
+  CI_LOGCAT_SCRIPT="${SYS_ROOT}/etc/init.portable_ci_logcat.sh"
+  install -m 0755 "${SCRIPT_DIR}/portable_ci_logcat_mirror.sh" "${CI_LOGCAT_SCRIPT}"
 
   HWC_SVC_DRMFB="vendor.hwcomposer-2-1.drmfb"
   HWC_SVC_V21="vendor.hwcomposer-2-1"
@@ -1505,6 +1647,7 @@ on post-fs
     chmod 0666 /dev/dri/renderD128
     chmod 0666 /dev/ion
     chmod 0666 /dev/dma_heap/system
+    restorecon /dev/tty0
     exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
 
 on property:portable.hwc.svc=drmfb
@@ -1525,31 +1668,54 @@ on property:portable.hwc.svc=v24
 on post-fs-data
     restorecon_recursive /data/adb
     restorecon_recursive /data/local/tmp
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; fi"
 
 on boot
     setprop debug.hwui.renderer opengl
+    # Loopback-only ADB TCP is used by the launcher and CI diagnostics.
+    setprop persist.sys.usb.config adb
+    setprop service.adb.tcp.port 5555
+    start adbd
+
+# CI-only fallback log capture when host ADB is unauthorized on a headless guest.
+service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_logcat.sh
+    class late_start
+    user root
+    group log
+    # Capture early linker/exec stderr in serial before host ADB is available.
+    # Android 13 init enables this on userdebug/eng builds.
+    stdio_to_kmsg
+    seclabel u:r:droidport_gfx:s0
+    disabled
+
+on property:ro.boot.portable_ci=1
+    start portable_ci_logcat_mirror
 
 on property:sys.boot_completed=1
     write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
 EOF
   chmod 0644 "${INIT_DIR}/init.portable_selinux.rc"
   rm -f "/tmp/hwc_service_map.env"
 
   # Ensure xattrs on newly created init.portable_graphics.sh & init.portable_selinux.rc match updated plat_file_contexts
-  python3 - "${SYS_ROOT}/etc/init.portable_graphics.sh" "${INIT_DIR}/init.portable_selinux.rc" "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" <<'X2PY'
+  python3 - "${SYS_ROOT}/etc/init.portable_graphics.sh" "${INIT_DIR}/init.portable_selinux.rc" "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" "${SYS_ROOT}/etc/init.portable_ci_logcat.sh" <<'X2PY'
 import os, sys
 pairs = [
     (sys.argv[1], "u:object_r:droidport_gfx_exec:s0"),
     (sys.argv[2], "u:object_r:system_file:s0"),
     (sys.argv[3], "u:object_r:init_exec:s0"),
+    (sys.argv[4], "u:object_r:system_file:s0"),
 ]
 for p, ctx in pairs:
     if os.path.exists(p):
         os.setxattr(p, b"security.selinux", ctx.encode() + b"\x00", follow_symlinks=False)
 X2PY
 fi
+
+# Headless QEMU has no interactive VT. Strip only init-service console options
+# from all imported system/vendor/odm/product init rc files. The PID-1 wrapper
+# uses /dev/null for init stdio; early kernel diagnostics stay on the serial UART.
+python3 "${SCRIPT_DIR}/sanitize_init_console.py" "${WORK_DIR}/mnt" "${SYS_ROOT}" "${WORK_DIR}/vendor_mnt"
+
 
 # Unmount & re-compress vendor.img if modified
 if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
