@@ -19,8 +19,8 @@ if [[ "${1:-}" == "--self-test" ]]; then
     printf "%s\n" "init: Service 'vendor.hwcomposer-2-1.drmfb' (pid 123) received signal 6" | grep -qE "$SERVICE_FAIL_RE"
     printf "%s\n" "init: Service 'surfaceflinger' (pid 124) received signal 11" | grep -qE "$SERVICE_FAIL_RE"
     printf "%s\n" "init: Service 'netd' (pid 125) exited with status 1" | grep -qE "$NETD_FAIL_RE"
-    printf "%s\n" "inet 10.0.2.15/24" | grep -qE 'inet 10\.0\\.2\\.[0-9]+/[0-9]+'
-    printf "%s\n" "default via 10.0.2.2 dev eth0" | grep -qE 'default via 10\.0\\.2\\.2( |$)'
+    printf "%s\n" "inet 10.0.2.15/24" | grep -qE 'inet 10\.0\.2\.[0-9]+/[0-9]+'
+    printf "%s\n" "default via 10.0.2.2 dev eth0" | grep -qE 'default via 10\.0\.2\.2( |$)'
     echo "QEMU smoke regex self-test passed."
     exit 0
 fi
@@ -159,11 +159,11 @@ run_boot_smoke() {
     if [[ "$boot_ok" -eq 1 && -z "$failure" ]]; then
         local eth0_addr=""
         local default_route=""
-        eth0_addr=$("$ADB_BIN" -s "$ADB_SERIAL" shell ip -4 addr show dev eth0 2>/dev/null | tr -d '\r' | grep -oE 'inet 10\.0\\.2\\.[0-9]+/[0-9]+' | head -n1 || true)
+        eth0_addr=$("$ADB_BIN" -s "$ADB_SERIAL" shell ip -4 addr show dev eth0 2>/dev/null | tr -d '\r' | grep -oE 'inet 10\.0\.2\.[0-9]+/[0-9]+' | head -n1 || true)
         default_route=$("$ADB_BIN" -s "$ADB_SERIAL" shell ip route show default 2>/dev/null | tr -d '\r' || true)
         if [[ -z "$eth0_addr" ]]; then
             failure="E1000 eth0 did not obtain a QEMU-user-network DHCP IPv4 address"
-        elif ! grep -qE 'default via 10\.0\\.2\\.2( |$)' <<<"$default_route"; then
+        elif ! grep -qE 'default via 10\.0\.2\.2( |$)' <<<"$default_route"; then
             failure="eth0 has IPv4 $eth0_addr but no default route via QEMU gateway 10.0.2.2"
         else
             echo "Network passed: eth0=$eth0_addr; $default_route"
