@@ -255,7 +255,13 @@ jobs:
 
             # A boot-complete event alone is insufficient: catch delayed netd/HWC/SF loops.
             if [ "${BOOT_OK}" -eq 1 ] && [ -z "${FAILURE}" ]; then
-              echo "Android reported BOOT_COMPLETED after ${ELAPSED}s; starting ${SOAK_SECONDS}s stability soak."
+              if ! grep -qE 'e1000 .*eth0:' "${LOGF}"; then
+                FAILURE="The guest did not register the configured E1000 device as eth0"
+              fi
+            fi
+
+            if [ "${BOOT_OK}" -eq 1 ] && [ -z "${FAILURE}" ]; then
+              echo "Android reported BOOT_COMPLETED after ${ELAPSED}s; E1000 eth0 is present; starting ${SOAK_SECONDS}s stability soak."
               while [ "${SOAK_ELAPSED}" -lt "${SOAK_SECONDS}" ]; do
                 if ! kill -0 "${QPID}" 2>/dev/null; then
                   FAILURE="QEMU exited during post-boot stability soak"
