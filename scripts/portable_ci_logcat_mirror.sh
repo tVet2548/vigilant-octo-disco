@@ -8,8 +8,8 @@ emit() {
     printf '<6>PORTABLE-LOGCAT %.900s\n' "$1" > "$KMSG" 2>/dev/null || true
 }
 
-emit "mirror starting"
-while [ ! -S /dev/socket/logdr ]; do
+emit "mirror starting; waiting for logd socket"
+while [ ! -e /dev/socket/logdr ]; do
     /system/bin/sleep 1
 done
 
@@ -27,6 +27,6 @@ while true; do
                 ;;
         esac
     done
-    emit "logcat stream ended; retrying in 2 seconds"
+    emit "logcat stream ended (exit=$?); retrying in 2 seconds"
     /system/bin/sleep 2
 done
