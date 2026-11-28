@@ -149,7 +149,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("*debuggerd*", mirror)
         self.assertIn("*DEBUG*", mirror)
         self.assertIn("*Abort message*", mirror)
-        self.assertIn('printf \'<6>PORTABLE-LOGCAT %.900s\\n\' "$line"', mirror)
+        self.assertIn('printf \'<6>PORTABLE-LOGCAT %.900s\\n\' "$1"', mirror)
         self.assertNotIn('\\${line:0:900}', mirror)
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):

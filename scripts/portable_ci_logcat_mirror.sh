@@ -5,7 +5,7 @@ LOGCAT=/system/bin/logcat
 KMSG=/dev/kmsg
 
 emit() {
-    printf '<6>PORTABLE-LOGCAT %.900s\\n' "$1" > "$KMSG" 2>/dev/null || true
+    printf '<6>PORTABLE-LOGCAT %.900s\n' "$1" > "$KMSG" 2>/dev/null || true
 }
 
 emit "mirror starting"
