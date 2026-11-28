@@ -240,6 +240,18 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
             'add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin mknod")',
             patch,
         )
+    def test_software_renderengine_uses_gles_and_only_observed_drm_ioctls(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        software_branch = patch.index('if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then')
+        gles_override = patch.index("setprop debug.renderengine.backend gles", software_branch)
+        mesa_software = patch.index("setprop mesa.libgl.always.software true", software_branch)
+        self.assertLess(gles_override, mesa_software)
+        self.assertIn('getprop debug.renderengine.backend', patch)
+        self.assertIn('"0x6400 0x640c 0x642e 0x6443 0x64a0"', patch)
+        self.assertEqual(patch.count('"0x6400 0x640c 0x642e 0x6443 0x64a0"'), 2)
+        self.assertNotIn('add_plat_allowx("surfaceflinger", "device"', patch)
+        self.assertNotIn("setenforce 0", patch)
+
     def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         patch = self.read("scripts/patch_system_img.sh")
