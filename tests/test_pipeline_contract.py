@@ -83,6 +83,12 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("setprop persist.sys.usb.config adb", patch)
         self.assertIn("setprop service.adb.tcp.port 5555", patch)
 
+    def test_qemu_smoke_has_executable_regex_self_test(self):
+        smoke = self.read("scripts/qemu_boot_smoke.sh")
+        validate = self.read(".github/workflows/validate.yml")
+        self.assertIn('--self-test', smoke)
+        self.assertIn('bash scripts/qemu_boot_smoke.sh --self-test', validate)
+
     def test_qemu_smoke_persists_serial_qemu_logcat_and_guest_state(self):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
         for name in ("serial.log", "qemu.stderr.log", "qemu.debug.log", "guest.logcat.log", "guest-state.log"):
