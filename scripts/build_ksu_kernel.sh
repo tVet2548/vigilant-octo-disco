@@ -715,14 +715,14 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
   # The Bliss donor kernel remains preserved separately as kernel_bliss_original.
   build_stock_kernel() {
     local STOCK_OK=0
-    local STOCK_LOG="\${WORK_DIR}/kernel_build_stock_llvm.log"
+    local STOCK_LOG="${WORK_DIR}/kernel_build_stock_llvm.log"
     if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
       echo "=== Building kernel_stock (no KernelSU; Clang/LLVM; QEMU VirtIO/DRM enabled) ==="
       make ARCH=x86_64 mrproper
       configure_ksunext_config "stock-llvm" --stock LLVM=1 LLVM_IAS=1
-      if make ARCH=x86_64 LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "\${STOCK_LOG}"; then
-        cp -f "\${KERNEL_SRC}/arch/x86/boot/bzImage" "\${IMG_DIR}/kernel_stock"
-        if verify_bzimage_qemu "\${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU LLVM=1)"; then
+      if make ARCH=x86_64 LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "${STOCK_LOG}"; then
+        cp -f "${KERNEL_SRC}/arch/x86/boot/bzImage" "${IMG_DIR}/kernel_stock"
+        if verify_bzimage_qemu "${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU LLVM=1)"; then
           STOCK_OK=1
         fi
       else
@@ -730,34 +730,34 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       fi
     fi
 
-    if [[ "\${STOCK_OK}" -ne 1 ]]; then
+    if [[ "${STOCK_OK}" -ne 1 ]]; then
       echo "=== Building kernel_stock (no KernelSU; GCC fallback; QEMU VirtIO/DRM enabled) ==="
       make ARCH=x86_64 mrproper
       configure_ksunext_config "stock-gcc" --stock
-      STOCK_LOG="\${WORK_DIR}/kernel_build_stock_gcc.log"
-      if ! make ARCH=x86_64 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "\${STOCK_LOG}"; then
+      STOCK_LOG="${WORK_DIR}/kernel_build_stock_gcc.log"
+      if ! make ARCH=x86_64 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "${STOCK_LOG}"; then
         echo "ERROR: no-KernelSU kernel_stock bzImage build failed!" >&2
-        grep -niE 'error:|fatal:|undefined reference|No such file' "\${STOCK_LOG}" | tail -n 60 >&2 || true
+        grep -niE 'error:|fatal:|undefined reference|No such file' "${STOCK_LOG}" | tail -n 60 >&2 || true
         exit 2
       fi
-      cp -f "\${KERNEL_SRC}/arch/x86/boot/bzImage" "\${IMG_DIR}/kernel_stock"
-      if ! verify_bzimage_qemu "\${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU GCC)"; then
+      cp -f "${KERNEL_SRC}/arch/x86/boot/bzImage" "${IMG_DIR}/kernel_stock"
+      if ! verify_bzimage_qemu "${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU GCC)"; then
         echo "ERROR: no-KernelSU kernel_stock failed QEMU IvyBridge earlycon check!" >&2
         exit 2
       fi
     fi
 
     local STOCK_TYPE
-    STOCK_TYPE=$(file -b "\${IMG_DIR}/kernel_stock" 2>/dev/null || echo "unknown")
-    if ! echo "\${STOCK_TYPE}" | grep -qiE 'bzImage|Linux kernel x86'; then
-      echo "ERROR: kernel_stock is not a valid x86 bzImage (\${STOCK_TYPE})!" >&2
+    STOCK_TYPE=$(file -b "${IMG_DIR}/kernel_stock" 2>/dev/null || echo "unknown")
+    if ! echo "${STOCK_TYPE}" | grep -qiE 'bzImage|Linux kernel x86'; then
+      echo "ERROR: kernel_stock is not a valid x86 bzImage (${STOCK_TYPE})!" >&2
       exit 2
     fi
     grep -q '^# CONFIG_KSU is not set' .config
     grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
     grep -q '^CONFIG_E1000=y' .config
-    printf 'no-KSU;CONFIG_DRM_VIRTIO_GPU=y;CONFIG_E1000=y;source=%s\n' "\${STOCK_MAJMIN}" > "\${IMG_DIR}/kernel_stock.meta"
-    echo "Verified no-KSU kernel_stock: $(stat -c%s "\${IMG_DIR}/kernel_stock") bytes (\${STOCK_TYPE})"
+    printf 'no-KSU;CONFIG_DRM_VIRTIO_GPU=y;CONFIG_E1000=y;source=%s\n' "${STOCK_MAJMIN}" > "${IMG_DIR}/kernel_stock.meta"
+    echo "Verified no-KSU kernel_stock: $(stat -c%s "${IMG_DIR}/kernel_stock") bytes (${STOCK_TYPE})"
   }
 
   build_stock_kernel
