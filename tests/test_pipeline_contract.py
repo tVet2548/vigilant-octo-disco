@@ -93,6 +93,9 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('add_plat_allow("droidport_gfx", "logcat_exec", "file"', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
+        self.assertIn('add_plat_allow(_sf_domain, "gpu_device", "chr_file"', patch)
+        self.assertIn('add_plat_allow("hal_graphics_allocator_default", "tty_device"', patch)
+        self.assertIn('add_ven_allow(("surfaceflinger",', patch)
         self.assertIn('add_ven_allow(("hal_graphics_composer_default",), "self", "capability", "net_admin")', patch)
         self.assertIn('add_ven_allow(("hal_graphics_allocator_default",), (f"default_prop_{plat_ver.replace', patch)
         self.assertIn('ro.adb.secure=0', patch)
@@ -102,6 +105,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         self.assertIn('2>&1 | while IFS= read -r line', mirror)
         self.assertIn('logcat stream ended (exit=$?); retrying in 2 seconds', mirror)
+        self.assertIn('[ -S /dev/socket/logdr ]', mirror)
 
     def test_bliss_init_and_ksu_hooks_do_not_run_in_graphics_domain(self):
         patch = self.read("scripts/patch_system_img.sh")
