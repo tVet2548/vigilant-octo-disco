@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -87,14 +88,14 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
             rc = root / "system/etc/init/netd.rc"
             rc.parent.mkdir(parents=True)
             rc.write_text(
-                "service netd /system/bin/netd\\n"
-                "    class main\\n"
-                "    console\\n"
-                "    socket dnsproxyd stream 0660 root inet\\n"
-                "on boot\\n"
-                "    setprop debug.note console\\n"
-                "service console /system/bin/sh\\n"
-                "    console tty0\\n",
+                "service netd /system/bin/netd\n"
+                "    class main\n"
+                "    console\n"
+                "    socket dnsproxyd stream 0660 root inet\n"
+                "on boot\n"
+                "    setprop debug.note console\n"
+                "service console /system/bin/sh\n"
+                "    console tty0\n",
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -104,10 +105,11 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("removed=2 files=1", result.stdout)
             sanitized = rc.read_text(encoding="utf-8")
-            self.assertNotIn("\\n    console\\n", sanitized)
-            self.assertNotIn("\\n    console tty0\\n", sanitized)
+            self.assertNotIn("\n    console\n", sanitized)
+            self.assertNotIn("\n    console tty0\n", sanitized)
             self.assertIn("setprop debug.note console", sanitized)
             self.assertIn("DroidPort headless CI", sanitized)
+
 
     def test_android_boot_keeps_early_uart_logging_without_framework_console(self):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
@@ -149,6 +151,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         self.assertIn("exec /system/bin/logcat -b all -v threadtime", mirror)
         self.assertIn("stdio_to_kmsg", patch)
+        self.assertIn("sanitize_init_console.py", patch)
 
 
     def test_bliss_init_and_ksu_hooks_do_not_run_in_graphics_domain(self):
