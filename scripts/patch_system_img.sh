@@ -769,10 +769,10 @@ for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
     add_plat_allow(_sf_domain, "gpu_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "graphics_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
-# The KSU trace identifies DRM_IOCTL_MODE_GETRESOURCES (0x640c) on renderD128.
-# Grant only the observed request, not the entire DRM ioctl command space.
-add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x640c")
-add_plat_allowxperm("surfaceflinger", "dri_device", "chr_file", "0x640c")
+# The captured KSU AVCs identify DRM ioctls 0x6400, 0x6443 and 0x640c
+# on renderD128. Grant only these observed commands, not the whole ioctl space.
+add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")
+add_plat_allowxperm("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x6443")
 
 # Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
 add_plat_allow("hal_graphics_allocator_default", "device", "chr_file", "read write open getattr ioctl map")
