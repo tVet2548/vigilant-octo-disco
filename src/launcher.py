@@ -1199,7 +1199,7 @@ class PortableAndroidLauncher(BaseCTk):
             cmd += ["-global", "fw_cfg.dma_enabled=off"]
 
         # Intel HD Graphics 4000 Safe Cascade:
-        # Default Auto: virtio-vga (DRM llvmpipe, gl=off, EDID 1280x720) -> -vga std (gl=off)
+        # Default Auto: virtio-vga (DRM llvmpipe, gl=off, QEMU-provided display mode) -> -vga std (gl=off)
         # Experimental VirGL: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on) -> virtio-vga (llvmpipe) -> -vga std
         if use_virgl and gl_device_mode == "vga_gl":
             cmd += ["-device", "virtio-vga-gl", "-display", "sdl,gl=es"]
