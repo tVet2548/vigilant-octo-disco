@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BUNDLE_DIR="$(realpath -m "\${1:-dist_bundle}")"
-DIAG_DIR="$(realpath -m "\${2:-\${RUNNER_TEMP:-/tmp}/qemu-android-diagnostics}")"
-QEMU_BIN="\${QEMU_BIN:-qemu-system-x86_64}"
-ADB_BIN="\${ADB_BIN:-adb}"
-BOOT_TIMEOUT_SECONDS="\${BOOT_TIMEOUT_SECONDS:-900}"
-ADB_TIMEOUT_SECONDS="\${ADB_TIMEOUT_SECONDS:-120}"
-SOAK_SECONDS="\${SOAK_SECONDS:-90}"
+BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
+DIAG_DIR="$(realpath -m "${2:-${RUNNER_TEMP:-/tmp}/qemu-android-diagnostics}")"
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+ADB_BIN="${ADB_BIN:-adb}"
+BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-900}"
+ADB_TIMEOUT_SECONDS="${ADB_TIMEOUT_SECONDS:-120}"
+SOAK_SECONDS="${SOAK_SECONDS:-90}"
 BOOT_MARKER='[PORTABLE-BOOT] BOOT_COMPLETED=1'
 NETD_FAIL_RE="Service 'netd'.*(exited with status [1-9][0-9]*|received signal (6|11))"
 SERVICE_FAIL_RE="Service '(vendor\\.hwcomposer[^']*|surfaceflinger|zygote(_secondary)?)'.*(exited with status [1-9][0-9]*|received signal (6|11))"
@@ -45,11 +45,11 @@ capture_guest_state() {
 run_boot_smoke() {
     local kname="$1"
     local iname="$2"
-    local serial_log="$DIAG_DIR/\${kname}.serial.log"
-    local stderr_log="$DIAG_DIR/\${kname}.qemu.stderr.log"
-    local debug_log="$DIAG_DIR/\${kname}.qemu.debug.log"
-    local logcat_log="$DIAG_DIR/\${kname}.guest.logcat.log"
-    local state_log="$DIAG_DIR/\${kname}.guest-state.log"
+    local serial_log="$DIAG_DIR/${kname}.serial.log"
+    local stderr_log="$DIAG_DIR/${kname}.qemu.stderr.log"
+    local debug_log="$DIAG_DIR/${kname}.qemu.debug.log"
+    local logcat_log="$DIAG_DIR/${kname}.guest.logcat.log"
+    local state_log="$DIAG_DIR/${kname}.guest-state.log"
     local qpid=""
     local logcat_pid=""
     local boot_ok=0
@@ -165,7 +165,7 @@ run_boot_smoke() {
     fi
     if [[ "$boot_ok" -eq 1 && -z "$failure" ]]; then
         capture_guest_state "$state_log"
-        echo "Android BOOT_COMPLETED + ADB + DHCP/default-route passed; starting \${SOAK_SECONDS}s stability soak."
+        echo "Android BOOT_COMPLETED + ADB + DHCP/default-route passed; starting ${SOAK_SECONDS}s stability soak."
         while [[ "$soak_elapsed" -lt "$SOAK_SECONDS" ]]; do
             if ! kill -0 "$qpid" 2>/dev/null; then
                 failure="QEMU/Xvfb exited during post-boot stability soak"
@@ -211,7 +211,7 @@ run_boot_smoke() {
     [[ ! -s "$state_log" ]] || { echo "--- $kname guest state diagnostics ---"; tail -n 180 "$state_log" || true; }
 
     if [[ "$boot_ok" -ne 1 && -z "$failure" ]]; then
-        failure="Android did not report BOOT_COMPLETED within \${BOOT_TIMEOUT_SECONDS}s"
+        failure="Android did not report BOOT_COMPLETED within ${BOOT_TIMEOUT_SECONDS}s"
     fi
     if [[ "$boot_ok" -eq 1 && "$soak_elapsed" -lt "$SOAK_SECONDS" && -z "$failure" ]]; then
         failure="Post-boot stability soak did not finish"
@@ -221,7 +221,7 @@ run_boot_smoke() {
         SMOKE_FAIL=1
         return 0
     fi
-    echo "PASSED: $kname reached BOOT_COMPLETED, ADB, E1000 DHCP/default route and survived \${SOAK_SECONDS}s."
+    echo "PASSED: $kname reached BOOT_COMPLETED, ADB, E1000 DHCP/default route and survived ${SOAK_SECONDS}s."
 }
 
 run_boot_smoke "kernel_ksunext" "initrd_ksunext.img"
