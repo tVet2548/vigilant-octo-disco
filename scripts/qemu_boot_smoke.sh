@@ -131,7 +131,7 @@ run_boot_smoke() {
         -drive "file=$BUNDLE_DIR/images/data.img,if=virtio,format=qcow2" \
         -kernel "$BUNDLE_DIR/images/$kname" \
         -initrd "$BUNDLE_DIR/images/$iname" \
-        -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=enforcing androidboot.portable_ci=1 HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb DATA=/dev/vdc printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep console=ttyS0,115200 loglevel=7" \
+        -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=enforcing androidboot.portable_ci=1 HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb DATA=/dev/vdc printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep loglevel=7" \
         -serial "file:$serial_log" \
         -d guest_errors,cpu_reset -D "$debug_log" >"$stderr_log" 2>&1 &
     qpid=$!

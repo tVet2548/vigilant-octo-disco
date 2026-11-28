@@ -79,11 +79,22 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("qemu-android-diagnostics", workflow)
         self.assertIn("sys.boot_completed", self.read("docs/boot-diagnostics.md"))
 
-    def test_android_boot_does_not_assign_framework_console_to_uart(self):
+    def test_android_boot_keeps_early_uart_logging_without_framework_console(self):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
-        self.assertIn("console=ttyS0,115200", smoke)
+        self.assertIn("earlycon=uart8250,io,0x3f8,115200", smoke)
+        self.assertIn("earlyprintk=serial,ttyS0,115200,keep", smoke)
+        self.assertNotIn("console=ttyS0", smoke)
         self.assertNotIn("androidboot.console=ttyS0", smoke)
         self.assertNotIn("SERIAL=ttyS0", smoke)
+
+    def test_ci_logcat_service_has_valid_selinux_domain_and_socket_access(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn("seclabel u:r:droidport_gfx:s0", patch)
+        self.assertIn('add_plat_allow("droidport_gfx", "logcat_exec", "file"', patch)
+        self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file"', patch)
+        self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
+        self.assertIn('"ctl_start_prop"', patch)
+        self.assertIn('"exported_config_prop"', patch)
 
     def test_portable_image_enables_adb_tcp(self):
         patch = self.read("scripts/patch_system_img.sh")

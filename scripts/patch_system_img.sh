@@ -731,7 +731,7 @@ add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "init", "fd", "use")
 add_plat_allow("droidport_gfx", "devpts", "chr_file", "read write getattr ioctl")
 add_plat_allow("droidport_gfx", "kernel", "fd", "use")
-for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop", "exported_default_prop", "debug_prop"]:
+for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop", "exported_config_prop", "exported_default_prop", "debug_prop", "ctl_start_prop"]:
     add_plat_allow("droidport_gfx", prop_t, "property_service", "set")
     add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
 
@@ -778,6 +778,9 @@ add_plat_allow("toolbox", "logcat_exec", "file", "read open getattr execute exec
 add_plat_allow("toolbox", "toolbox_exec", "file", "read open getattr execute execute_no_trans map")
 add_plat_allow("toolbox", "logdr_socket", "sock_file", "write")
 add_plat_allow("toolbox", "logd", "unix_stream_socket", "connectto")
+add_plat_allow("droidport_gfx", "logcat_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "write")
+add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "property_socket", "sock_file", "write")
 add_plat_allow("toolbox", "init", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "unlabeled", "dir", "read open getattr search")
@@ -1549,6 +1552,7 @@ service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_lo
     class late_start
     user root
     group log
+    seclabel u:r:droidport_gfx:s0
     disabled
 
 on property:ro.boot.portable_ci=1
