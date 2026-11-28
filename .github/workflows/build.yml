@@ -232,6 +232,8 @@ jobs:
           test -s "${BUNDLE_DIR}/bin/adb.exe"
           test -s "${BUNDLE_DIR}/bin/scrcpy/scrcpy.exe"
           test -s "${BUNDLE_DIR}/images/kernel_stock"
+          test -s "${BUNDLE_DIR}/images/kernel_bliss_original"
+          test -s "${BUNDLE_DIR}/images/kernel_stock.meta"
           test -s "${BUNDLE_DIR}/images/kernel_ksunext"
           test -s "${BUNDLE_DIR}/images/initrd.img"
           test -s "${BUNDLE_DIR}/images/initrd_stock.img"
