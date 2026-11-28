@@ -704,6 +704,11 @@ def add_plat_allow(src, tgt, cls, perms):
     if src in plat_types and (tgt in plat_types or tgt == "self") and cls in declared_classes:
         plat_rules.append(f"(allow {src} {tgt} ({cls} ({perms})))")
 
+def add_plat_allowxperm(src, tgt, cls, commands):
+    # Require a matching base ioctl allow plus only the observed ioctl numbers.
+    if src in plat_types and tgt in plat_types and cls in declared_classes:
+        plat_rules.append(f"(allowxperm {src} {tgt} ({cls} (ioctl ({commands}))))")
+
 # Dedicated droidport_gfx domain for init.portable_graphics.sh & init.sh (avoids init execute_no_trans!)
 if "droidport_gfx" not in declared_types:
     plat_rules.extend([
@@ -764,6 +769,10 @@ for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
     add_plat_allow(_sf_domain, "gpu_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "graphics_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
+# The KSU trace identifies DRM_IOCTL_MODE_GETRESOURCES (0x640c) on renderD128.
+# Grant only the observed request, not the entire DRM ioctl command space.
+add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x640c")
+add_plat_allowxperm("surfaceflinger", "dri_device", "chr_file", "0x640c")
 
 # Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
 add_plat_allow("hal_graphics_allocator_default", "device", "chr_file", "read write open getattr ioctl map")
@@ -1517,21 +1526,26 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
     done
   fi
 
-  # The drmfb HWC needs a real fbdev node. A vendor RC/service file alone is
-  # not evidence that this kernel exposed fb0 (stock kernel in CI has no fb0).
+  # drmfb requires a real /dev/fb0 character node, not merely sysfs fb0.
+  # The DRM composer path requires an actual DRM card node; service files alone
+  # are not proof that this kernel exposes the device interface.
   HAS_FB=0
-  if [ -e /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]; then
-    HAS_FB=1
-  fi
-  _glog "software_display fb0_present=${HAS_FB} fb0_driver=${FB_DRV}"
+  [ -c /dev/fb0 ] && HAS_FB=1
+  HAS_DRI=0
+  [ -c /dev/dri/card0 ] && HAS_DRI=1
+  _glog "software_display fb0_node=${HAS_FB} dri_card_node=${HAS_DRI} fb0_driver=${FB_DRV}"
 
   if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; }; then
     setprop debug.sf.hwc_service_name drmfb
     setprop portable.hwc.svc drmfb
-  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; then
+  elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; }; then
+    setprop debug.sf.hwc_service_name v21
     setprop portable.hwc.svc v21
-  elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; then
+  elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; }; then
+    setprop debug.sf.hwc_service_name v24
     setprop portable.hwc.svc v24
+  else
+    _glog "ERROR: no usable framebuffer or DRM card node; refusing to start a broken HWC service"
   fi
 else
   # 3D VirGL hardware path: ensure EGL/HWC/Gralloc & composer service are active
