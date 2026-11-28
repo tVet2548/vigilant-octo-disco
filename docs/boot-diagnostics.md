@@ -11,11 +11,12 @@ The guest uses QEMU's negotiated VirtIO display mode; no custom 1280x720 DRM
 modeline is forced. Xvfb supplies a real display backend instead of using
 `-display none`, so the guest's display/HWC path is exercised in CI.
 
-The kernel command line retains `console=ttyS0`, `earlycon` and `earlyprintk`
-for kernel and init-wrapper diagnostics, but omits `androidboot.console=ttyS0`
-and `SERIAL=ttyS0`. Android framework services should not inherit the diagnostic
-UART as their Android console. The init wrapper separately mirrors kernel messages
-to the serial log.
+The QEMU command line sets `androidboot.console=null`, so init services that use
+the default Android console do not inherit `/dev/tty0` (or a diagnostic UART).
+Kernel diagnostics still use `earlycon=uart8250` and `earlyprintk` on QEMU serial;
+the init wrapper separately mirrors kernel messages to the serial log. The CI
+logcat service uses Android init `stdio_to_kmsg` to expose early exec/linker errors
+before ADB is ready.
 
 ## Previous failure evidence
 
@@ -23,10 +24,13 @@ The failed run `46115043624` at commit `0748312` established:
 
 * KernelSU reached Android userspace; `netd` exited with status 1 at about 64 seconds.
   Android init then restarted zygote.
-* SELinux logged denials for `netd`, zygote and other domains accessing
-  `/dev/ttyS0`, whose runtime target label was `u:object_r:device:s0`.
-  This is a console/label mismatch signal, but the log did not include the netd
-  exception or tombstone, so it was not enough to prove the cause.
+* The latest run `46138876965` showed `netd` exit 1 at about 71 seconds and
+  repeated SurfaceFlinger failures. The serial trace also showed many domains
+  denied access to `/dev/tty0` (runtime label `device`, and in the KSU variant
+  `gpu_device`), consistent with init services inheriting the default virtual
+  console. It also showed SurfaceFlinger denied DRM ioctl `0x640c` on
+  `/dev/dri/renderD128`. The host did not reach ADB and no tombstone/backtrace
+  was collected, so `netd`'s own failure remains unproven.
 * Stock kernel did not emit `BOOT_COMPLETED` within 900 seconds.
 * The previous CI regex missed init's `received signal 6` form. The signals in
   the final tail occurred at the end of the timed-out run; without a crash backtrace
@@ -42,8 +46,17 @@ NIC caused the netd exit.
   loopback; CI uses host port 5556.
 * CI runs QEMU's SDL software display under Xvfb, keeping the VirtIO VGA display
   path active without host GPU acceleration.
-* The Android framework console override is removed while kernel UART diagnostics
-  remain enabled.
+* QEMU sets `androidboot.console=null` for init-service console descriptors while
+  retaining early UART diagnostics. The CI logcat service sends stdout/stderr to
+  kmsg through `stdio_to_kmsg`, making pre-ADB service exec errors visible.
+* The QEMU `kernel_stock` profile is separately built as a no-KernelSU kernel
+  from the same source/config family as `kernel_ksunext`, with VirtIO GPU/DRM and
+  E1000 enabled. The original Bliss ISO kernel is retained as
+  `kernel_bliss_original`; it lacks the VirtIO/DRM nodes required by this QEMU
+  display model and is not used for the CI A/B boot comparison.
+* HWC selection requires an actual `/dev/fb0` character node for drmfb or an
+  actual `/dev/dri/card0` node for DRM composer. A vendor service file alone is
+  not treated as proof of a usable kernel device.
 * The smoke test captures serial, QEMU stderr, QEMU guest debug, full Android logcat,
   guest properties, interface addresses, routes, SurfaceFlinger state and tombstone
   directory visibility.
