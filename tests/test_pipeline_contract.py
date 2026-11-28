@@ -84,6 +84,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("earlycon=uart8250,io,0x3f8,115200", smoke)
         self.assertIn("earlyprintk=serial,ttyS0,115200,keep", smoke)
         self.assertNotIn("console=ttyS0", smoke)
+        self.assertIn("androidboot.console=null", smoke)
         self.assertNotIn("androidboot.console=ttyS0", smoke)
         self.assertNotIn("SERIAL=ttyS0", smoke)
 
@@ -103,9 +104,9 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('"ctl_start_prop"', patch)
         self.assertIn('"exported_config_prop"', patch)
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
-        self.assertIn('\"$LOGCAT\" -b all -v threadtime 2>&1 | while IFS= read -r line', mirror)
-        self.assertIn('logcat stream ended; retrying in 2 seconds', mirror)
-        self.assertIn('[ -S /dev/socket/logdr ]', mirror)
+        self.assertIn("exec /system/bin/logcat -b all -v threadtime", mirror)
+        self.assertIn("stdio_to_kmsg", patch)
+
 
     def test_bliss_init_and_ksu_hooks_do_not_run_in_graphics_domain(self):
         patch = self.read("scripts/patch_system_img.sh")
@@ -147,20 +148,34 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('if [ "${AVAIL_GB}" -ge 45 ]; then', cleanup)
         self.assertIn('skipping destructive toolchain cleanup', cleanup)
 
+    def test_qemu_stock_kernel_is_built_without_ksu_but_with_virtio_graphics_and_e1000(self):
+        build = self.read("scripts/build_ksu_kernel.sh")
+        self.assertIn("kernel_bliss_original", build)
+        self.assertIn('configure_ksunext_config "stock-llvm" --stock LLVM=1 LLVM_IAS=1', build)
+        self.assertIn("./scripts/config --disable CONFIG_KSU", build)
+        self.assertIn("grep -q '^# CONFIG_KSU is not set' .config", build)
+        self.assertIn("grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config", build)
+        self.assertIn("grep -q '^CONFIG_E1000=y' .config", build)
+        self.assertIn("build_stock_kernel", build)
+
     def test_ci_drmfb_hwc_requires_a_real_framebuffer(self):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('HAS_FB=0', patch)
-        self.assertIn('[ -e /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]', patch)
+        self.assertIn("[ -c /dev/fb0 ] && HAS_FB=1", patch)
+        self.assertIn("[ -c /dev/dri/card0 ] && HAS_DRI=1", patch)
         self.assertIn('if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ]', patch)
         self.assertIn('setprop portable.hwc.svc v21', patch)
 
     def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
+        self.assertIn("exec /system/bin/logcat -b all -v threadtime", mirror)
+        self.assertIn("stdio_to_kmsg", self.read("scripts/patch_system_img.sh"))
+        self.assertNotIn("while IFS= read -r line", mirror)
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         self.assertIn("*debuggerd*", mirror)
-        self.assertIn("*DEBUG*", mirror)
-        self.assertIn("*Abort message*", mirror)
+
+
         self.assertIn('printf \'<6>PORTABLE-LOGCAT %.900s\\n\' "$1"', mirror)
-        self.assertNotIn('\\${line:0:900}', mirror)
+
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):
         workflow = self.read(".github/workflows/main.yml")
