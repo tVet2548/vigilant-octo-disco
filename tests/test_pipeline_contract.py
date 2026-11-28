@@ -103,7 +103,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('"ctl_start_prop"', patch)
         self.assertIn('"exported_config_prop"', patch)
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
-        self.assertIn('2>&1 | while IFS= read -r line', mirror)
+        self.assertIn('logcat_output=$(\"$LOGCAT\" -b all -v threadtime 2>&1)', mirror)
         self.assertIn('logcat stream ended; exit=$logcat_status; retrying in 2 seconds', mirror)
         self.assertIn('[ -S /dev/socket/logdr ]', mirror)
 
