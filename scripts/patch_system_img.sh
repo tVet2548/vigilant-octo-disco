@@ -1685,54 +1685,11 @@ for p, ctx in pairs:
 X2PY
 fi
 
-# Headless QEMU has no interactive VT. Strip only init-service `console`
-# options (not shell commands or action triggers) from every imported Android
-# init rc file. The PID-1 wrapper already gives init /dev/null on fds 0/1/2,
-# and kernel diagnostics are captured by earlycon/earlyprintk on the serial.
-python3 - "${WORK_DIR}/mnt" "${SYS_ROOT}" "${WORK_DIR}/vendor_mnt" <<'CONSOLEPY'
-import pathlib, re, sys
+# Headless QEMU has no interactive VT. Strip only init-service console options
+# from all imported system/vendor/odm/product init rc files. The PID-1 wrapper
+# uses /dev/null for init stdio; early kernel diagnostics stay on the serial UART.
+python3 "${SCRIPT_DIR}/sanitize_init_console.py" "${WORK_DIR}/mnt" "${SYS_ROOT}" "${WORK_DIR}/vendor_mnt"
 
-roots = [pathlib.Path(x) for x in sys.argv[1:] if x]
-seen = set()
-changed_files = []
-removed = 0
-for root in roots:
-    if not root.exists():
-        continue
-    for rc in root.rglob("*.rc"):
-        try:
-            key = rc.resolve()
-        except OSError:
-            key = rc
-        if key in seen or not rc.is_file():
-            continue
-        seen.add(key)
-        try:
-            lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-        except OSError:
-            continue
-        out = []
-        in_service = False
-        local_removed = 0
-        for line in lines:
-            stripped = line.strip()
-            top_level = bool(line) and not line[0].isspace() and stripped and not stripped.startswith("#")
-            if top_level:
-                in_service = stripped.startswith("service ")
-            if in_service and re.fullmatch(r"console(?:\s+\S+)?", stripped):
-                indent = line[:len(line) - len(line.lstrip())]
-                out.append(indent + "# DroidPort headless CI: console option removed; inherit /dev/null\n")
-                local_removed += 1
-            else:
-                out.append(line)
-        if local_removed:
-            rc.write_text("".join(out), encoding="utf-8")
-            changed_files.append((str(rc), local_removed))
-            removed += local_removed
-print(f"Headless init RC sanitation: removed {removed} service console option(s) from {len(changed_files)} file(s).")
-for filename, count in changed_files:
-    print(f"  {filename}: {count}")
-CONSOLEPY
 
 # Unmount & re-compress vendor.img if modified
 if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
