@@ -15,6 +15,16 @@ FATAL_RE='\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing|InitFatalReboot|Ini
 ADB_SERIAL="127.0.0.1:5556"
 SMOKE_FAIL=0
 
+if [[ "${1:-}" == "--self-test" ]]; then
+    printf "%s\\n" "init: Service 'vendor.hwcomposer-2-1.drmfb' (pid 123) received signal 6" | grep -qE "$SERVICE_FAIL_RE"
+    printf "%s\\n" "init: Service 'surfaceflinger' (pid 124) received signal 11" | grep -qE "$SERVICE_FAIL_RE"
+    printf "%s\\n" "init: Service 'netd' (pid 125) exited with status 1" | grep -qE "$NETD_FAIL_RE"
+    printf "%s\\n" "inet 10.0.2.15/24" | grep -qE 'inet 10\\.0\\.2\\.[0-9]+/[0-9]+'
+    printf "%s\\n" "default via 10.0.2.2 dev eth0" | grep -qE 'default via 10\\.0\\.2\\.2( |$)'
+    echo "QEMU smoke regex self-test passed."
+    exit 0
+fi
+
 mkdir -p "$DIAG_DIR"
 test -s "$BUNDLE_DIR/images/system.img"
 test -s "$BUNDLE_DIR/images/vendor.img"
