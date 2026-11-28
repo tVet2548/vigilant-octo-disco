@@ -58,6 +58,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("SOAK_SECONDS=90", workflow)
         self.assertIn("[PORTABLE-BOOT] BOOT_COMPLETED=1", workflow)
         self.assertIn("Service 'netd'.*exited with status [1-9]", workflow)
+        self.assertIn("Service 'zygote(_secondary)?' exited with status [1-9]", workflow)
         self.assertIn("-device e1000,netdev=net0", workflow)
         self.assertIn("e1000 .*eth0:", workflow)
         self.assertNotIn("seq 1 135", workflow)
