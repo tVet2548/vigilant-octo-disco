@@ -40,6 +40,7 @@ jobs:
           bash -n scripts/fetch_assets.sh
           bash -n scripts/patch_system_img.sh
           bash -n scripts/qemu_boot_smoke.sh
+          bash scripts/qemu_boot_smoke.sh --self-test
 
       - name: Run pipeline contract tests
         run: python -m unittest discover -s tests -v
