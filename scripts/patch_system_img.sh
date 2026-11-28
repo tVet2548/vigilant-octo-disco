@@ -778,7 +778,7 @@ for dev_t in ["dri_device", "gpu_device", "graphics_device", "ion_device", "dmab
 # permission scoped to droidport_gfx; do not grant kmsg_debug to every domain.
 add_plat_allow("droidport_gfx", "kmsg_debug_device", "chr_file", "write open getattr")
 
-add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin")
+add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin mknod")
 add_plat_allow("droidport_gfx", "file_contexts_file", "file", "read open getattr map")
 add_plat_allow("droidport_gfx", "property_socket", "sock_file", "write")
 add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
@@ -1582,13 +1582,13 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
   _glog "software_display fb0_node=${HAS_FB} fb0_dev=${FB_DEV_NUMBER:-none} dri_card_node=${HAS_DRI} fb0_driver=${FB_DRV}"
 
   if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; }; then
-    setprop debug.sf.hwc_service_name drmfb
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc drmfb
   elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; }; then
-    setprop debug.sf.hwc_service_name v21
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc v21
   elif [ "${HAS_DRI}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.4-service ] || ls /vendor/etc/init/*composer@2.4-service.rc >/dev/null 2>&1; }; then
-    setprop debug.sf.hwc_service_name v24
+    setprop debug.sf.hwc_service_name default
     setprop portable.hwc.svc v24
   else
     _glog "ERROR: no usable framebuffer or DRM card node; refusing to start a broken HWC service"
