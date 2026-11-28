@@ -188,7 +188,7 @@ jobs:
           SOAK_SECONDS=90
           BOOT_MARKER='[PORTABLE-BOOT] BOOT_COMPLETED=1'
           FAIL_RE='\[INIT-WRAPPER\] FATAL:|Kernel panic - not syncing|InitFatalReboot|Init encountered errors|Attempted to kill init|reboot: Restarting system|has incorrect label or no domain transition|vrend_decode_ctx_submit_cmd|Illegal command buffer'
-          GFX_FAIL_RE="Service 'vendor\.hwcomposer[^']*' exited with status [1-9]|Service 'surfaceflinger' exited with status [1-9]|surfaceflinger.*killed by signal 9"
+          GFX_FAIL_RE="Service 'vendor\.hwcomposer[^']*' exited with status [1-9]|Service 'surfaceflinger' exited with status [1-9]|Service 'zygote(_secondary)?' exited with status [1-9]|surfaceflinger.*killed by signal 9"
 
           run_boot_smoke() {
             local KNAME="$1"
@@ -288,7 +288,7 @@ jobs:
             wait "${QPID}" 2>/dev/null || true
 
             echo "--- Android boot, network and graphics diagnostics (${KNAME}) ---"
-            grep -iE 'PORTABLE-BOOT|init second stage|PORTABLE-GFX|netd|zygote|surfaceflinger|bootanim|e1000|eth0|dhcp|bpfloader|panic|FATAL|exited with status' "${LOGF}" 2>/dev/null | tail -n 120 || true
+            grep -iE 'PORTABLE-BOOT|init second stage|PORTABLE-GFX|netd|zygote|surfaceflinger|zygote|bootanim|e1000|eth0|dhcp|bpfloader|panic|FATAL|exited with status' "${LOGF}" 2>/dev/null | tail -n 120 || true
             echo "--- Tail of serial log ---"
             tail -n 80 "${LOGF}" 2>/dev/null || true
             echo "--- QEMU stderr ---"
