@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +81,34 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("qemu-android-diagnostics", workflow)
         self.assertIn("sys.boot_completed", self.read("docs/boot-diagnostics.md"))
 
+    def test_headless_init_sanitizer_removes_only_service_console_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rc = root / "system/etc/init/netd.rc"
+            rc.parent.mkdir(parents=True)
+            rc.write_text(
+                "service netd /system/bin/netd\\n"
+                "    class main\\n"
+                "    console\\n"
+                "    socket dnsproxyd stream 0660 root inet\\n"
+                "on boot\\n"
+                "    setprop debug.note console\\n"
+                "service console /system/bin/sh\\n"
+                "    console tty0\\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/sanitize_init_console.py"), str(root)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("removed=2 files=1", result.stdout)
+            sanitized = rc.read_text(encoding="utf-8")
+            self.assertNotIn("\\n    console\\n", sanitized)
+            self.assertNotIn("\\n    console tty0\\n", sanitized)
+            self.assertIn("setprop debug.note console", sanitized)
+            self.assertIn("DroidPort headless CI", sanitized)
+
     def test_android_boot_keeps_early_uart_logging_without_framework_console(self):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
         launcher = self.read("src/launcher.py")
@@ -104,6 +134,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('seclabel u:r:droidport_gfx:s0', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logcat_exec", "file"', patch)
+        self.assertIn('add_plat_allow("droidport_gfx", "kmsg_debug_device", "chr_file", "write open getattr")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
         self.assertIn('add_plat_allow(_sf_domain, "gpu_device", "chr_file"', patch)
@@ -179,6 +210,8 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('HAS_FB=0', patch)
         self.assertIn("[ -c /dev/fb0 ] && HAS_FB=1", patch)
+        self.assertIn("FB_DEV_NUMBER=$(cat /sys/class/graphics/fb0/dev", patch)
+        self.assertIn('mknod /dev/fb0 c "$FB_MAJOR" "$FB_MINOR"', patch)
         self.assertIn("[ -c /dev/dri/card0 ] && HAS_DRI=1", patch)
         self.assertIn('if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ]', patch)
         self.assertIn('elif [ "${HAS_DRI}" -eq 1 ] && {', patch)
