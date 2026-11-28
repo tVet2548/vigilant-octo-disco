@@ -704,10 +704,11 @@ def add_plat_allow(src, tgt, cls, perms):
     if src in plat_types and (tgt in plat_types or tgt == "self") and cls in declared_classes:
         plat_rules.append(f"(allow {src} {tgt} ({cls} ({perms})))")
 
-def add_plat_allowxperm(src, tgt, cls, commands):
-    # Require a matching base ioctl allow plus only the observed ioctl numbers.
+def add_plat_allowx(src, tgt, cls, commands):
+    # CIL uses allowx (not the TE allowxperm spelling); require the base ioctl
+    # allow and whitelist only the command values observed in the AVC records.
     if src in plat_types and tgt in plat_types and cls in declared_classes:
-        plat_rules.append(f"(allowxperm {src} {tgt} ({cls} (ioctl ({commands}))))")
+        plat_rules.append(f"(allowx {src} {tgt} (ioctl {cls} ({commands})))")
 
 # Dedicated droidport_gfx domain for init.portable_graphics.sh & init.sh (avoids init execute_no_trans!)
 if "droidport_gfx" not in declared_types:
@@ -771,7 +772,7 @@ for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
     add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
 # The captured KSU AVCs identify DRM ioctls 0x6400, 0x6443 and 0x640c
 # on renderD128. Grant only these observed commands, not the whole ioctl space.
-add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")
+add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")
 add_plat_allowxperm("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x6443")
 
 # Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
