@@ -839,8 +839,8 @@ if ven_cil_path.is_file():
 
     add_ven_allow(("hal_graphics_composer_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_composer_default",), "self", "netlink_kobject_uevent_socket", "create bind read write getattr getopt setopt")
-    add_ven_allow(("hal_graphics_composer_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("hal_graphics_composer_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_composer_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_composer_default",), (f"tty_device_{plat_ver.replace('.', '_')}", "tty_device"), "chr_file", "read write open getattr ioctl")
     add_ven_allow(("hal_graphics_composer_default",), ("gpu_device", f"gpu_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_composer_default",), ("graphics_device", f"graphics_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     # drm-hotplug uses NETLINK_KOBJECT_UEVENT and requires CAP_NET_ADMIN; without
@@ -849,18 +849,18 @@ if ven_cil_path.is_file():
 
     # These graphics allocator rules must live in vendor policy: the allocator
     # type belongs to the vendor policy namespace, so plat-only allows are dropped.
-    add_ven_allow(("hal_graphics_allocator_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("hal_graphics_allocator_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
-    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search")
-    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "file", "read open getattr")
-    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "lnk_file", "read getattr")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"tty_device_{plat_ver.replace('.', '_')}", "tty_device"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "dir", "read open getattr search")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "file", "read open getattr")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "lnk_file", "read getattr")
 
     add_ven_allow(("hal_gnss_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
-    add_ven_allow(("hal_light_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search")
-    add_ven_allow(("hal_light_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "file", "read open getattr")
-    add_ven_allow(("hal_audio_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
-    add_ven_allow(("vendor_init",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("hal_light_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_light_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "dir", "read open getattr search")
+    add_ven_allow(("hal_light_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "file", "read open getattr")
+    add_ven_allow(("hal_audio_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("vendor_init",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
     add_ven_allow(("vendor_init",), ("config_prop", f"config_prop_{plat_ver.replace('.', '_')}"), "property_service", "set")
     add_ven_allow(("vendor_init",), ("dhcp_data_file", f"dhcp_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
     add_ven_allow(("vendor_init",), ("system_data_file", f"system_data_file_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search write add_name create setattr")
