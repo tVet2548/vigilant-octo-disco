@@ -208,6 +208,9 @@ sed -i '/^ro\.opengles\.version=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist=/d' "${PROP_FILE}"
 sed -i '/^ro\.product\.cpu\.abilist64=/d' "${PROP_FILE}"
 sed -i '/^ro\.dalvik\.vm\.native\.bridge=/d' "${PROP_FILE}"
+sed -i '/^ro\.adb\.secure=/d' "${PROP_FILE}"
+sed -i '/^ro\.debuggable=/d' "${PROP_FILE}"
+sed -i '/^persist\.adb\.tcp\.port=/d' "${PROP_FILE}"
 
 cat <<'EOF' >> "${PROP_FILE}"
 
@@ -220,6 +223,11 @@ ro.opengles.version=196608
 ro.product.cpu.abilist=x86_64,x86,arm64-v8a,armeabi-v7a,armeabi
 ro.product.cpu.abilist64=x86_64,arm64-v8a
 ro.dalvik.vm.native.bridge=libndk_translation.so
+
+# CI-only ADB TCP diagnostics: loopback hostfwd is the only exposed transport.
+ro.debuggable=1
+ro.adb.secure=0
+persist.adb.tcp.port=5555
 EOF
 
 # Ensure all required Android root directories, real /sbin dir, and /init symlink exist
@@ -835,6 +843,17 @@ if ven_cil_path.is_file():
     add_ven_allow(("hal_graphics_composer_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
     add_ven_allow(("hal_graphics_composer_default",), ("gpu_device", f"gpu_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_composer_default",), ("graphics_device", f"graphics_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
+    # drm-hotplug uses NETLINK_KOBJECT_UEVENT and requires CAP_NET_ADMIN; without
+    # this vendor-domain permission it emits tens of thousands of AVCs and starves audit.
+    add_ven_allow(("hal_graphics_composer_default",), "self", "capability", "net_admin")
+
+    # These graphics allocator rules must live in vendor policy: the allocator
+    # type belongs to the vendor policy namespace, so plat-only allows are dropped.
+    add_ven_allow(("hal_graphics_allocator_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), ("tty_device", f"tty_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl")
+    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "dir", "read open getattr search")
+    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "file", "read open getattr")
+    add_ven_allow(("hal_graphics_allocator_default",), ("sysfs", f"sysfs_{plat_ver.replace('.', '_')}"), "lnk_file", "read getattr")
 
     add_ven_allow(("hal_gnss_default",), ("vndbinder_device", f"vndbinder_device_{plat_ver.replace('.', '_')}"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_light_default",), ("default_prop", f"default_prop_{plat_ver.replace('.', '_')}"), "file", "read open getattr map")
@@ -1573,7 +1592,9 @@ service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_lo
     class late_start
     user root
     group log
-    seclabel ${PORTABLE_PRIV_SECLABEL:-u:r:droidport_gfx:s0}
+    # Keep the CI log bridge in its dedicated policy domain even on userdebug/eng
+    # builds; the general su domain is not granted the kmsg/logdr contract below.
+    seclabel u:r:droidport_gfx:s0
     disabled
 
 on property:ro.boot.portable_ci=1
