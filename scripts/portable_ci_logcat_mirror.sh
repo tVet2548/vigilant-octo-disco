@@ -8,10 +8,15 @@ emit() {
     printf '<6>PORTABLE-LOGCAT %.900s\n' "$1" > "$KMSG" 2>/dev/null || true
 }
 
-emit "mirror starting; waiting for logd socket"
-while [ ! -e /dev/socket/logdr ]; do
+emit "mirror starting"
+# Init creates socket nodes before logd finishes binding them. Wait for a live socket.
+for _ in $(/system/bin/seq 1 60); do
+    [ -S /dev/socket/logdr ] && break
     /system/bin/sleep 1
 done
+if [ ! -S /dev/socket/logdr ]; then
+    emit "logdr socket unavailable after 60s"
+fi
 
 # Capture logcat's stderr too: a denied socket/exec used to make the service
 # exit with status 1 without leaving any explanation in the serial artifact.
