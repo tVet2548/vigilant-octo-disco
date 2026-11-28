@@ -3,7 +3,8 @@
 ## Supported baseline
 
 The CI baseline for Intel Ivy Bridge is QEMU TCG, software VirtIO VGA with an SDL
-display backed by Xvfb, and an E1000 NIC. VirGL remains optional; host OpenGL is
+display backed by Xvfb, and an E1000 NIC. The runner must install the separate
+`qemu-system-gui` package; `qemu-system-x86` alone may lack the SDL display backend. VirGL remains optional; host OpenGL is
 not required for the software path.
 
 The guest uses QEMU's negotiated VirtIO display mode; no custom 1280x720 DRM
