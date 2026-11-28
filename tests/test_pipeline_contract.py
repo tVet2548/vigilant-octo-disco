@@ -167,6 +167,11 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("grep -q '^CONFIG_E1000=y' .config", build)
         self.assertIn("build_stock_kernel", build)
 
+        stock_start = build.index("  build_stock_kernel() {")
+        stock_end = build.index("\n  build_stock_kernel\n", stock_start)
+        stock_fn = build[stock_start:stock_end]
+        self.assertNotIn(r"\${", stock_fn)
+
     def test_ci_drmfb_hwc_requires_a_real_framebuffer(self):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('HAS_FB=0', patch)
