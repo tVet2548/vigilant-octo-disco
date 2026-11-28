@@ -789,6 +789,9 @@ add_plat_allow("hal_graphics_allocator_default", "sysfs", "lnk_file", "read geta
 # SurfaceFlinger & BootAnimation DRM/GPU/tty0/sysfs/prop permissions
 add_plat_allow("surfaceflinger", "gpu_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "tty_device", "chr_file", "read write open getattr ioctl")
+add_plat_allowxperm("surfaceflinger", "tty_device", "chr_file", "0x4b3a 0x5603")
+add_plat_allowxperm("surfaceflinger", "device", "chr_file", "0x4b3a 0x5603")
+add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x4b3a 0x5603")
 add_plat_allow("surfaceflinger", "graphics_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "device", "chr_file", "read write open getattr ioctl")
 add_plat_allow("surfaceflinger", "sysfs", "dir", "read open getattr search")
@@ -1597,6 +1600,7 @@ on post-fs
     chmod 0666 /dev/dri/renderD128
     chmod 0666 /dev/ion
     chmod 0666 /dev/dma_heap/system
+    restorecon /dev/tty0
     exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.portable_graphics.sh
 
 on property:portable.hwc.svc=drmfb
@@ -1630,8 +1634,9 @@ service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_lo
     class late_start
     user root
     group log
-    # Keep the CI log bridge in its dedicated policy domain even on userdebug/eng
-    # builds; the general su domain is not granted the kmsg/logdr contract below.
+    # Capture early linker/exec stderr in serial before host ADB is available.
+    # Android 13 init enables this on userdebug/eng builds.
+    stdio_to_kmsg
     seclabel u:r:droidport_gfx:s0
     disabled
 
