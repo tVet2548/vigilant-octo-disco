@@ -134,8 +134,8 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
     def test_surfaceflinger_ioctl_policy_matches_only_observed_drm_commands(self):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('plat_rules.append(f"(allowx {src} {tgt} (ioctl {cls} ({commands})))")', patch)
-        self.assertIn('add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")', patch)
-        self.assertIn('add_plat_allowx("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x6443")', patch)
+        self.assertIn('add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")', patch)
+        self.assertIn('add_plat_allowx("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")', patch)
         self.assertNotIn("add_plat_allowxperm", patch)
         self.assertNotIn('plat_rules.append(f"(allowxperm ', patch)
         self.assertNotIn('add_plat_allowx("surfaceflinger", "device"', patch)
