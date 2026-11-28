@@ -1241,9 +1241,9 @@ class PortableAndroidLauncher(BaseCTk):
                 "root=/dev/ram0 androidboot.hardware=android_x86_64 "
                 f"{selinux_arg} androidboot.init_fatal_panic=true "
                 f"{gfx_cmdline} "
-                "DATA=/dev/vdc androidboot.console=ttyS0 printk.devkmsg=on printk.always_kmsg_dump=1 "
+                "DATA=/dev/vdc androidboot.console=null printk.devkmsg=on printk.always_kmsg_dump=1 "
                 "nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 "
-                "console=tty0 console=ttyS0,115200 SERIAL=ttyS0 loglevel=7"
+                "earlyprintk=serial,ttyS0,115200,keep loglevel=7"
             ),
             "-serial", serial_target,
         ]
