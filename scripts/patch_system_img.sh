@@ -170,7 +170,13 @@ fi
 
 SYS_SDK=$(grep -E '^ro\.build\.version\.sdk=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
 SYS_REL=$(grep -E '^ro\.build\.version\.release=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
-echo "Detected system.img Android version=${SYS_REL:-unknown}, SDK API=${SYS_SDK:-unknown}"
+SYS_BUILD_TYPE=$(grep -E '^ro\.build\.type=' "${PROP_FILE}" | head -n1 | cut -d= -f2 | tr -d '[:space:]' || true)
+PORTABLE_PRIV_SECLABEL=""
+case "${SYS_BUILD_TYPE}" in
+  userdebug|eng) PORTABLE_PRIV_SECLABEL="u:r:su:s0" ;;
+  *) echo "WARNING: ro.build.type=${SYS_BUILD_TYPE:-unknown}; privileged Bliss init.sh hooks will be skipped (su domain is only enabled on userdebug/eng)." >&2 ;;
+esac
+echo "Detected system.img Android version=${SYS_REL:-unknown}, SDK API=${SYS_SDK:-unknown}, build type=${SYS_BUILD_TYPE:-unknown}, privileged domain=${PORTABLE_PRIV_SECLABEL:-disabled}"
 if [ -n "${SYS_SDK}" ] && [ "${SYS_SDK}" != "33" ]; then
   echo "WARNING: Expected API 33 (Android 13) for 1:1 Bliss OS 16.9 parity, detected API ${SYS_SDK}." >&2
 fi
@@ -363,10 +369,11 @@ EOF
   fi
 
   # Sanitize vendor/etc/init/hw/init.android_x86_64.rc for native Enforcing + clean graphics sequencing
-  python3 - "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" <<'RCPY'
+  python3 - "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" "${PORTABLE_PRIV_SECLABEL}" <<'RCPY'
 import pathlib, re, sys
 
 rc = pathlib.Path(sys.argv[1])
+priv_domain = sys.argv[2]
 if not rc.exists():
     sys.exit(0)
 lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
@@ -386,20 +393,24 @@ for line in lines:
         indent = line[:len(line) - len(line.lstrip())]
         out.append(f"{indent}mount_all /vendor/etc/fstab.android_x86_64 --late\n")
         continue
-    # Transition init.sh invocations into droidport_gfx domain (never u:r:init:s0 execute_no_trans)
+    # Bliss init.sh performs privileged mount/module setup; never run it inside
+    # the constrained graphics helper domain. AOSP exposes u:r:su:s0 on userdebug/eng.
     if "/system/etc/init.sh" in s and not s.startswith("#"):
         if "eglsetup" in s:
             out.append("# handled by init.portable_graphics.sh: " + line)
             continue
-        fixed = re.sub(r"exec\s+(?:u:r:init:s0|-)\s+--\s+(?:/system/bin/logwrapper\s+)?", "exec u:r:droidport_gfx:s0 -- ", line)
-        out.append(fixed)
+        if not priv_domain:
+            out.append("# disabled: Bliss init.sh needs AOSP su domain on userdebug/eng: " + line)
+        else:
+            fixed = re.sub(r"exec\s+(?:u:r:[^\s]+|-)\s+--\s+(?:/system/bin/logwrapper\s+)?", f"exec {priv_domain} -- ", line)
+            out.append(fixed)
         continue
     out.append(line)
 rc.write_text("".join(out), encoding="utf-8")
 print(f"Sanitized {rc} for native Enforcing & single-composer sequencing.")
 RCPY
 
-  # Guarantee Bliss init.sh executes cleanly in u:r:droidport_gfx:s0 if not already hooked, and streamline slow loop scans
+  # Patch Bliss init.sh graphics-property defaults; execute its privileged hooks only in AOSP su domain.
   if [ -f "${SYS_ROOT}/etc/init.sh" ]; then
     python3 - "${SYS_ROOT}/etc/init.sh" <<'INITSHPY'
 import pathlib, re, sys
@@ -430,15 +441,19 @@ if "droidport_fast_patch" not in txt:
     print("Patched /system/etc/init.sh to preserve portable graphics properties.")
 INITSHPY
     if ! grep -q '/system/etc/init.sh' "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc" 2>/dev/null; then
-      echo "Injecting Bliss /system/etc/init.sh hooks into vendor/etc/init/hw/init.android_x86_64.rc..."
-      cat <<'EOF' >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
+      if [ -n "${PORTABLE_PRIV_SECLABEL}" ]; then
+        echo "Injecting Bliss /system/etc/init.sh hooks under ${PORTABLE_PRIV_SECLABEL}..."
+        cat <<EOF >> "${WORK_DIR}/vendor_mnt/etc/init/hw/init.android_x86_64.rc"
 
 on post-fs
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh
+    exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh
 
 on property:sys.boot_completed=1
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh /system/etc/init.sh bootcomplete
+    exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh bootcomplete
 EOF
+      else
+        echo "Skipping Bliss init.sh hooks: image build type has no AOSP su domain."
+      fi
     fi
   fi
 
@@ -734,6 +749,13 @@ add_plat_allow("droidport_gfx", "kernel", "fd", "use")
 for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop", "exported_config_prop", "exported_default_prop", "debug_prop", "ctl_start_prop"]:
     add_plat_allow("droidport_gfx", prop_t, "property_service", "set")
     add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
+
+# Graphics allocator reads standard display/allocator properties and device topology.
+add_plat_allow("hal_graphics_allocator_default", "default_prop", "file", "read open getattr map")
+add_plat_allow("hal_graphics_allocator_default", "system_prop", "file", "read open getattr map")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "dir", "read open getattr search")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "file", "read open getattr")
+add_plat_allow("hal_graphics_allocator_default", "sysfs", "lnk_file", "read getattr")
 
 # SurfaceFlinger & BootAnimation DRM/GPU/tty0/sysfs/prop permissions
 add_plat_allow("surfaceflinger", "gpu_device", "chr_file", "read write open getattr ioctl map")
@@ -1538,7 +1560,6 @@ on property:portable.hwc.svc=v24
 on post-fs-data
     restorecon_recursive /data/adb
     restorecon_recursive /data/local/tmp
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud post-fs-data 2>/dev/null || true; fi"
 
 on boot
     setprop debug.hwui.renderer opengl
@@ -1552,7 +1573,7 @@ service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_lo
     class late_start
     user root
     group log
-    seclabel u:r:droidport_gfx:s0
+    seclabel ${PORTABLE_PRIV_SECLABEL:-u:r:droidport_gfx:s0}
     disabled
 
 on property:ro.boot.portable_ci=1
@@ -1560,7 +1581,6 @@ on property:ro.boot.portable_ci=1
 
 on property:sys.boot_completed=1
     write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"
-    exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
 EOF
   chmod 0644 "${INIT_DIR}/init.portable_selinux.rc"
   rm -f "/tmp/hwc_service_map.env"

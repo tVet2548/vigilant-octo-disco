@@ -89,12 +89,30 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
 
     def test_ci_logcat_service_has_valid_selinux_domain_and_socket_access(self):
         patch = self.read("scripts/patch_system_img.sh")
-        self.assertIn("seclabel u:r:droidport_gfx:s0", patch)
+        self.assertIn('seclabel ${PORTABLE_PRIV_SECLABEL:-u:r:droidport_gfx:s0}', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logcat_exec", "file"', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
         self.assertIn('"ctl_start_prop"', patch)
         self.assertIn('"exported_config_prop"', patch)
+        mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
+        self.assertIn('2>&1 | while IFS= read -r line', mirror)
+        self.assertIn('logcat stream ended; retrying in 2 seconds', mirror)
+
+    def test_bliss_init_and_ksu_hooks_do_not_run_in_graphics_domain(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn("SYS_BUILD_TYPE=", patch)
+        self.assertIn('userdebug|eng) PORTABLE_PRIV_SECLABEL="u:r:su:s0"', patch)
+        self.assertIn('f"exec {priv_domain} -- "', patch)
+        self.assertIn("exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh", patch)
+        self.assertNotIn('exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ]', patch)
+        self.assertIn('exec u:r:ksu:s0 root -- /data/adb/ksud post-fs-data', self.read("scripts/build_ksu_kernel.sh"))
+
+    def test_gralloc_allocator_receives_read_only_property_and_sysfs_access(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn('add_plat_allow("hal_graphics_allocator_default", "default_prop", "file", "read open getattr map")', patch)
+        self.assertIn('add_plat_allow("hal_graphics_allocator_default", "system_prop", "file", "read open getattr map")', patch)
+        self.assertIn('add_plat_allow("hal_graphics_allocator_default", "sysfs", "file", "read open getattr")', patch)
 
     def test_portable_image_enables_adb_tcp(self):
         patch = self.read("scripts/patch_system_img.sh")
