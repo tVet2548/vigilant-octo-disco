@@ -46,7 +46,10 @@ echo "=== [2/4] Extracting kernel_stock, initrd.img, and API-33 vendor.img ==="
 mkdir -p "${WORK_DIR}/iso_mnt" "${WORK_DIR}/sfs_mnt" "/tmp/bliss_donor_meta"
 mount -o loop,ro "${WORK_DIR}/bliss_donor.iso" "${WORK_DIR}/iso_mnt"
 
-cp -f "${WORK_DIR}/iso_mnt/kernel" "${IMG_DIR}/kernel_stock"
+cp -f "${WORK_DIR}/iso_mnt/kernel" "${IMG_DIR}/kernel_bliss_original"
+# Keep the Bliss donor kernel intact for reference. The QEMU stock profile is
+# rebuilt below without KernelSU but with the same VirtIO/DRM driver contract.
+cp -f "${IMG_DIR}/kernel_bliss_original" "${IMG_DIR}/kernel_stock"
 cp -f "${WORK_DIR}/iso_mnt/initrd.img" "${IMG_DIR}/initrd.img"
 cp -f "${WORK_DIR}/iso_mnt/initrd.img" "/tmp/base_initrd.img"
 
@@ -334,12 +337,19 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
   configure_ksunext_config() {
     local MODE="$1"
     shift
+    local KSU_MODE=1
+    if [[ "${1:-}" == "--stock" ]]; then
+      KSU_MODE=0
+      shift
+    fi
     local MAKE_ARGS=("$@")
-    echo "Generating clean QEMU/Android-13 x86_64 .config (${MODE}) from x86_64_defconfig..."
+    local KERNEL_LOCALVERSION="-android13-ksu"
+    [[ "${KSU_MODE}" -eq 1 ]] || KERNEL_LOCALVERSION="-android13-stock"
+    echo "Generating clean QEMU/Android-13 x86_64 .config (${MODE}; KSU=${KSU_MODE}) from x86_64_defconfig..."
     make ARCH=x86_64 "${MAKE_ARGS[@]}" x86_64_defconfig
 
     ./scripts/config \
-      --set-str CONFIG_LOCALVERSION "-android13-ksu" \
+      --set-str CONFIG_LOCALVERSION "${KERNEL_LOCALVERSION}" \
       --set-str CONFIG_SYSTEM_TRUSTED_KEYS "" \
       --set-str CONFIG_SYSTEM_REVOCATION_KEYS "" \
       --set-str CONFIG_MODULE_SIG_KEY "" \
@@ -626,11 +636,21 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       ./scripts/config --disable CONFIG_PARAVIRT --disable CONFIG_RANDOMIZE_BASE --disable CONFIG_RANDOMIZE_MEMORY || true
     fi
 
+    if [[ "${KSU_MODE}" -eq 0 ]]; then
+      # Same Android/VirtIO profile, explicitly excluding KernelSU symbols.
+      ./scripts/config --disable CONFIG_KSU --disable CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER --disable CONFIG_KSU_KPROBE_HOOKS --disable CONFIG_KSU_SUSFS
+    fi
+
     yes "" | make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig >/dev/null 2>&1 || make ARCH=x86_64 "${MAKE_ARGS[@]}" olddefconfig
     echo "Verified critical kernel symbols (${MODE}):"
     grep -E 'CONFIG_(CC_IS_CLANG|LD_IS_LLD|KSU|KSU_X86_PATCH_SYSCALL_DISPATCHER|KPROBES|KSU_KPROBE_HOOKS|OVERLAY_FS|TMPFS_XATTR|EXT4_FS_SECURITY|RANDOMIZE_BASE|EFI_STUB|PARAVIRT|GENERIC_CPU|KERNEL_GZIP|BPF_SYSCALL|CGROUP_BPF|PSI|SECURITY_SELINUX_DEVELOP|EARLY_PRINTK|SERIAL_EARLYCON|SERIAL_8250|FB|DRM|DRM_KMS_HELPER|DRM_FBDEV_EMULATION|FRAMEBUFFER_CONSOLE|DRM_VIRTIO_GPU|DRM_BOCHS|DRM_SIMPLEDRM|DRM_VGEM|DMABUF_HEAPS_SYSTEM|SYNC_FILE|ANDROID_BINDER|DEVTMPFS)' .config | head -n 110 || true
-    grep -q '^CONFIG_KSU=y' .config
-    grep -q '^CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y' .config
+    if [[ "${KSU_MODE}" -eq 1 ]]; then
+      grep -q '^CONFIG_KSU=y' .config
+      grep -q '^CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y' .config
+    else
+      grep -q '^# CONFIG_KSU is not set' .config
+      ! grep -q '^CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y' .config
+    fi
     grep -q '^CONFIG_OVERLAY_FS=y' .config
     grep -q '^CONFIG_VIRTIO_BLK=y' .config
     grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' .config
@@ -690,6 +710,59 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     echo "PASSED: ${LABEL} reached Linux earlycon cleanly under QEMU IvyBridge!"
     return 0
   }
+
+  # Build a non-KernelSU baseline from this same source tree/config first.
+  # The Bliss donor kernel remains preserved separately as kernel_bliss_original.
+  build_stock_kernel() {
+    local STOCK_OK=0
+    local STOCK_LOG="\${WORK_DIR}/kernel_build_stock_llvm.log"
+    if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
+      echo "=== Building kernel_stock (no KernelSU; Clang/LLVM; QEMU VirtIO/DRM enabled) ==="
+      make ARCH=x86_64 mrproper
+      configure_ksunext_config "stock-llvm" --stock LLVM=1 LLVM_IAS=1
+      if make ARCH=x86_64 LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "\${STOCK_LOG}"; then
+        cp -f "\${KERNEL_SRC}/arch/x86/boot/bzImage" "\${IMG_DIR}/kernel_stock"
+        if verify_bzimage_qemu "\${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU LLVM=1)"; then
+          STOCK_OK=1
+        fi
+      else
+        echo "WARN: stock LLVM bzImage compile failed; retrying GCC." >&2
+      fi
+    fi
+
+    if [[ "\${STOCK_OK}" -ne 1 ]]; then
+      echo "=== Building kernel_stock (no KernelSU; GCC fallback; QEMU VirtIO/DRM enabled) ==="
+      make ARCH=x86_64 mrproper
+      configure_ksunext_config "stock-gcc" --stock
+      STOCK_LOG="\${WORK_DIR}/kernel_build_stock_gcc.log"
+      if ! make ARCH=x86_64 KCFLAGS="-Wno-error" -j"$(nproc)" bzImage 2>&1 | tee "\${STOCK_LOG}"; then
+        echo "ERROR: no-KernelSU kernel_stock bzImage build failed!" >&2
+        grep -niE 'error:|fatal:|undefined reference|No such file' "\${STOCK_LOG}" | tail -n 60 >&2 || true
+        exit 2
+      fi
+      cp -f "\${KERNEL_SRC}/arch/x86/boot/bzImage" "\${IMG_DIR}/kernel_stock"
+      if ! verify_bzimage_qemu "\${IMG_DIR}/kernel_stock" "kernel_stock (no-KSU GCC)"; then
+        echo "ERROR: no-KernelSU kernel_stock failed QEMU IvyBridge earlycon check!" >&2
+        exit 2
+      fi
+    fi
+
+    local STOCK_TYPE
+    STOCK_TYPE=$(file -b "\${IMG_DIR}/kernel_stock" 2>/dev/null || echo "unknown")
+    if ! echo "\${STOCK_TYPE}" | grep -qiE 'bzImage|Linux kernel x86'; then
+      echo "ERROR: kernel_stock is not a valid x86 bzImage (\${STOCK_TYPE})!" >&2
+      exit 2
+    fi
+    grep -q '^# CONFIG_KSU is not set' .config
+    grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
+    grep -q '^CONFIG_E1000=y' .config
+    printf 'no-KSU;CONFIG_DRM_VIRTIO_GPU=y;CONFIG_E1000=y;source=%s\n' "\${STOCK_MAJMIN}" > "\${IMG_DIR}/kernel_stock.meta"
+    echo "Verified no-KSU kernel_stock: $(stat -c%s "\${IMG_DIR}/kernel_stock") bytes (\${STOCK_TYPE})"
+  }
+
+  build_stock_kernel
+  # Never reuse stock-profile object files when enabling the KernelSU config.
+  make ARCH=x86_64 mrproper
 
   K_BUILT_OK=0
   if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
