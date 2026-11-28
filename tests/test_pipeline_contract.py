@@ -228,6 +228,18 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('elif [ "${HAS_DRI}" -eq 1 ] && {', patch)
         self.assertIn('setprop portable.hwc.svc v21', patch)
 
+    def test_hwc_uses_the_registered_default_instance_and_graphics_helper_can_create_fb0(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertEqual(patch.count('setprop debug.sf.hwc_service_name default'), 3)
+        self.assertNotIn('setprop debug.sf.hwc_service_name drmfb', patch)
+        self.assertNotIn('setprop debug.sf.hwc_service_name v21', patch)
+        self.assertNotIn('setprop debug.sf.hwc_service_name v24', patch)
+        for target in ("drmfb", "v21", "v24"):
+            self.assertIn(f"setprop portable.hwc.svc {target}", patch)
+        self.assertIn(
+            'add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin mknod")',
+            patch,
+        )
     def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         patch = self.read("scripts/patch_system_img.sh")
