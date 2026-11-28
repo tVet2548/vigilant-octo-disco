@@ -33,6 +33,7 @@ test -s "$BUNDLE_DIR/images/vendor.img"
 test -s "$BUNDLE_DIR/images/data.img"
 command -v "$QEMU_BIN" >/dev/null
 command -v xvfb-run >/dev/null
+command -v setsid >/dev/null
 command -v "$ADB_BIN" >/dev/null
 "$ADB_BIN" start-server >/dev/null
 
@@ -75,7 +76,7 @@ run_boot_smoke() {
     "$ADB_BIN" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true
     echo "=== Android full boot: $kname / $iname; TCG IvyBridge; SELinux Enforcing; E1000; SDL software display under Xvfb ==="
 
-    xvfb-run -a --server-args="-screen 0 1280x720x24 -nolisten tcp" \
+    setsid xvfb-run -a --server-args="-screen 0 1280x720x24 -nolisten tcp" \
         "$QEMU_BIN" \
         -name "CI-Smoke-$kname" \
         -no-reboot -snapshot \
@@ -207,8 +208,17 @@ run_boot_smoke() {
         kill "$logcat_pid" 2>/dev/null || true
         wait "$logcat_pid" 2>/dev/null || true
     fi
-    kill "$qpid" 2>/dev/null || true
-    wait "$qpid" 2>/dev/null || true
+    # QEMU and Xvfb share a dedicated session/process group; terminate the whole
+    # group so a failed smoke test cannot leave an orphaned guest on the runner.
+    if [[ -n "$qpid" ]]; then
+        kill -TERM -- "-$qpid" 2>/dev/null || true
+        for ((stop_wait=0; stop_wait<20; stop_wait++)); do
+            kill -0 -- "-$qpid" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL -- "-$qpid" 2>/dev/null || true
+        wait "$qpid" 2>/dev/null || true
+    fi
     "$ADB_BIN" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true
 
     echo "--- $kname serial diagnostics ---"
