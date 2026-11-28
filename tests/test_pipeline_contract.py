@@ -106,7 +106,11 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('f"exec {priv_domain} -- "', patch)
         self.assertIn("exec ${PORTABLE_PRIV_SECLABEL} -- /system/bin/sh /system/etc/init.sh", patch)
         self.assertNotIn('exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ]', patch)
-        self.assertIn('exec u:r:ksu:s0 root -- /data/adb/ksud post-fs-data', self.read("scripts/build_ksu_kernel.sh"))
+        # KernelSU's own generated init.rc installs this native hook at runtime;
+        # the portable patch must not add a second invocation in its graphics domain.
+        self.assertNotIn("ksud post-fs-data", patch)
+        self.assertNotIn("ksud boot-completed", patch)
+        self.assertIn("restorecon_recursive /data/adb", patch)
 
     def test_gralloc_allocator_receives_read_only_property_and_sysfs_access(self):
         patch = self.read("scripts/patch_system_img.sh")
