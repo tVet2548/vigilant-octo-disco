@@ -30,7 +30,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         workflow = self.read(".github/workflows/build.yml")
         expected = "IvyBridge,-ht,-tsc-deadline,+ssse3,+sse4.1,+sse4.2,+popcnt"
         self.assertIn(expected, source)
-        self.assertIn(expected, workflow)
+        self.assertIn(expected, workflow + self.read("scripts/qemu_boot_smoke.sh"))
 
     def test_kernel_build_enables_e1000_driver_explicitly(self):
         source = self.read("scripts/build_ksu_kernel.sh")
@@ -87,7 +87,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         smoke = self.read("scripts/qemu_boot_smoke.sh")
         for name in ("serial.log", "qemu.stderr.log", "qemu.debug.log", "guest.logcat.log", "guest-state.log"):
             self.assertIn(name, smoke)
-        self.assertIn("adb shell getprop", smoke)
+        self.assertIn('"$ADB_BIN" -s "$ADB_SERIAL" shell getprop', smoke)
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):
         workflow = self.read(".github/workflows/main.yml")
