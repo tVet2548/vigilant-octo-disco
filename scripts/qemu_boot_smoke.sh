@@ -5,6 +5,7 @@ QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 ADB_BIN="${ADB_BIN:-adb}"
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-900}"
 ADB_TIMEOUT_SECONDS="${ADB_TIMEOUT_SECONDS:-120}"
+POST_FAILURE_ADB_GRACE_SECONDS="${POST_FAILURE_ADB_GRACE_SECONDS:-45}"
 SOAK_SECONDS="${SOAK_SECONDS:-90}"
 BOOT_MARKER='[PORTABLE-BOOT] BOOT_COMPLETED=1'
 NETD_FAIL_RE="Service 'netd'.*(exited with status [1-9][0-9]*|received signal (6|11))"
@@ -39,6 +40,8 @@ command -v "$ADB_BIN" >/dev/null
 
 capture_guest_state() {
     local out="$1"
+    local tombstone_list="$DIAG_DIR/${kname}.tombstones.list"
+    local remote base target
     {
         echo "===== getprop ====="
         timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell getprop 2>&1 || true
@@ -46,13 +49,43 @@ capture_guest_state() {
         timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell ip addr 2>&1 || true
         echo "===== default routes ====="
         timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell ip route show default 2>&1 || true
+        echo "===== service states ====="
+        timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell getprop init.svc.adbd 2>&1 || true
+        timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell getprop init.svc.netd 2>&1 || true
+        timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell getprop init.svc.zygote 2>&1 || true
         echo "===== SurfaceFlinger ====="
         timeout 30s "$ADB_BIN" -s "$ADB_SERIAL" shell dumpsys SurfaceFlinger 2>&1 || true
-        echo "===== tombstone directory ====="
-        timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell ls -la /data/tombstones 2>&1 || true
+        echo "===== tombstone/anr directory metadata ====="
+        timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell 'ls -laZ /data/tombstones; ls -laZ /data/anr' 2>&1 || true
         echo "===== crash buffer ====="
         timeout 30s "$ADB_BIN" -s "$ADB_SERIAL" logcat -b crash -d -v threadtime 2>&1 || true
+        echo "===== recent AndroidRuntime/debuggerd errors ====="
+        timeout 30s "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -d -v threadtime -t 2500 2>&1 | grep -iE 'Fatal signal|Abort message|backtrace|crash_dump|tombstoned|debuggerd|AndroidRuntime|F DEBUG|netd|SurfaceFlinger|hwcomposer|zygote' || true
     } > "$out"
+
+    timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell 'ls -1 /data/tombstones/tombstone_* 2>/dev/null' 2>/dev/null | tr -d '\r' > "$tombstone_list" || true
+    if [[ ! -s "$tombstone_list" ]]; then
+        echo "No tombstone files were listed by the guest (directory may be empty or shell access denied)." > "$tombstone_list"
+    else
+        while IFS= read -r remote; do
+            [[ "$remote" == /data/tombstones/tombstone_* ]] || continue
+            base="${remote##*/}"
+            target="$DIAG_DIR/${kname}.${base}.txt"
+            if ! timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" pull "$remote" "$target" >> "$out" 2>&1; then
+                timeout 20s "$ADB_BIN" -s "$ADB_SERIAL" shell su -c "cat '$remote'" > "$target" 2>> "$out" || true
+            fi
+        done < "$tombstone_list"
+    fi
+
+    timeout 30s "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -d -v threadtime -t 5000 > "$DIAG_DIR/${kname}.guest-logcat-snapshot.log" 2>&1 || true
+}
+
+start_guest_logcat_capture() {
+    if [[ -z "${logcat_pid}" ]]; then
+        "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -v threadtime > "$logcat_log" 2>&1 &
+        logcat_pid=$!
+        echo "ADB connected; full guest logcat capture started."
+    fi
 }
 
 run_boot_smoke() {
@@ -73,6 +106,10 @@ run_boot_smoke() {
     local soak_elapsed=0
 
     rm -f "$serial_log" "$stderr_log" "$debug_log" "$logcat_log" "$state_log"
+    : > "$serial_log"
+    printf "ADB logcat stream was not established before smoke-test exit. See serial PORTABLE-LOGCAT mirror and guest-logcat snapshot.\\n" > "$logcat_log"
+    printf "Guest-state capture pending; ADB availability will be checked again after an early failure.\\n" > "$state_log"
+    printf "No tombstone listing collected yet.\\n" > "$DIAG_DIR/${kname}.tombstones.list"
     "$ADB_BIN" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true
     echo "=== Android full boot: $kname / $iname; TCG IvyBridge; SELinux Enforcing; E1000; SDL software display under Xvfb ==="
 
@@ -94,7 +131,7 @@ run_boot_smoke() {
         -drive "file=$BUNDLE_DIR/images/data.img,if=virtio,format=qcow2" \
         -kernel "$BUNDLE_DIR/images/$kname" \
         -initrd "$BUNDLE_DIR/images/$iname" \
-        -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=enforcing HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb DATA=/dev/vdc printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep console=ttyS0,115200 loglevel=7" \
+        -append "root=/dev/ram0 androidboot.hardware=android_x86_64 androidboot.selinux=enforcing androidboot.portable_ci=1 HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb DATA=/dev/vdc printk.devkmsg=on printk.always_kmsg_dump=1 nokaslr panic=0 earlycon=uart8250,io,0x3f8,115200 earlyprintk=serial,ttyS0,115200,keep console=ttyS0,115200 loglevel=7" \
         -serial "file:$serial_log" \
         -d guest_errors,cpu_reset -D "$debug_log" >"$stderr_log" 2>&1 &
     qpid=$!
@@ -125,9 +162,7 @@ run_boot_smoke() {
             if "$ADB_BIN" -s "$ADB_SERIAL" get-state >/dev/null 2>&1; then
                 if [[ "$adb_ready" -eq 0 ]]; then
                     adb_ready=1
-                    "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -v threadtime >"$logcat_log" 2>&1 &
-                    logcat_pid=$!
-                    echo "ADB connected; full guest logcat capture started."
+                    start_guest_logcat_capture
                 fi
             fi
         fi
@@ -139,8 +174,7 @@ run_boot_smoke() {
             "$ADB_BIN" connect "$ADB_SERIAL" >/dev/null 2>&1 || true
             if "$ADB_BIN" -s "$ADB_SERIAL" get-state >/dev/null 2>&1; then
                 adb_ready=1
-                "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -v threadtime >"$logcat_log" 2>&1 &
-                logcat_pid=$!
+                start_guest_logcat_capture
                 echo "ADB connected after boot; full guest logcat capture started."
                 break
             fi
@@ -173,9 +207,6 @@ run_boot_smoke() {
         fi
     fi
 
-    if [[ -n "$failure" && "$adb_ready" -eq 1 ]]; then
-        capture_guest_state "$state_log"
-    fi
     if [[ "$boot_ok" -eq 1 && -z "$failure" ]]; then
         capture_guest_state "$state_log"
         echo "Android BOOT_COMPLETED + ADB + DHCP/default-route passed; starting ${SOAK_SECONDS}s stability soak."
@@ -200,10 +231,31 @@ run_boot_smoke() {
             soak_elapsed=$((soak_elapsed + 5))
         done
     fi
+    if [[ -n "$failure" && "$adb_ready" -eq 0 ]]; then
+        echo "Early Android failure detected; keeping QEMU alive for up to ${POST_FAILURE_ADB_GRACE_SECONDS}s to collect crash logs/tombstones."
+        for ((adb_elapsed=0; adb_elapsed<POST_FAILURE_ADB_GRACE_SECONDS; adb_elapsed+=2)); do
+            "$ADB_BIN" connect "$ADB_SERIAL" >/dev/null 2>&1 || true
+            if "$ADB_BIN" -s "$ADB_SERIAL" get-state >/dev/null 2>&1; then
+                adb_ready=1
+                start_guest_logcat_capture
+                break
+            fi
+            sleep 2
+        done
+    fi
     if [[ -n "$failure" && "$adb_ready" -eq 1 ]]; then
+        # Allow crash_dump/tombstoned to finish writing before pulling the state.
+        sleep 5
         capture_guest_state "$state_log"
+    elif [[ -n "$failure" ]]; then
+        printf "ADB remained unavailable for %ss after failure; guest-side PORTABLE-LOGCAT mirror is the primary crash trace.\\n" "$POST_FAILURE_ADB_GRACE_SECONDS" > "$state_log"
+        printf "Tombstones could not be queried because ADB never became reachable.\\n" > "$DIAG_DIR/${kname}.tombstones.list"
+        printf "Guest-side mirror status is in the serial log.\\n" > "$logcat_log"
     fi
 
+    if [[ "$adb_ready" -eq 1 && ! -s "$DIAG_DIR/${kname}.guest-logcat-snapshot.log" ]]; then
+        timeout 30s "$ADB_BIN" -s "$ADB_SERIAL" logcat -b all -d -v threadtime -t 5000 > "$DIAG_DIR/${kname}.guest-logcat-snapshot.log" 2>&1 || true
+    fi
     if [[ -n "$logcat_pid" ]]; then
         kill "$logcat_pid" 2>/dev/null || true
         wait "$logcat_pid" 2>/dev/null || true

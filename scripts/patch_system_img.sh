@@ -731,7 +731,7 @@ add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "init", "fd", "use")
 add_plat_allow("droidport_gfx", "devpts", "chr_file", "read write getattr ioctl")
 add_plat_allow("droidport_gfx", "kernel", "fd", "use")
-for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop"]:
+for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_default_prop", "config_prop", "exported_default_prop", "debug_prop"]:
     add_plat_allow("droidport_gfx", prop_t, "property_service", "set")
     add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
 

@@ -69,6 +69,9 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("Service 'netd'", smoke)
         self.assertIn("hostfwd=tcp:127.0.0.1:5556-:5555", smoke)
         self.assertIn("logcat -b all -v threadtime", smoke)
+        self.assertIn("androidboot.portable_ci=1", smoke)
+        self.assertIn("POST_FAILURE_ADB_GRACE_SECONDS", smoke)
+        self.assertIn("tombstone", smoke)
         self.assertIn("ip route show default", smoke)
         self.assertIn("-device e1000,netdev=net0", smoke)
         self.assertIn("xvfb-run -a", smoke)
@@ -98,6 +101,14 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         for name in ("serial.log", "qemu.stderr.log", "qemu.debug.log", "guest.logcat.log", "guest-state.log"):
             self.assertIn(name, smoke)
         self.assertIn('"$ADB_BIN" -s "$ADB_SERIAL" shell getprop', smoke)
+
+    def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
+        mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
+        self.assertIn("*debuggerd*", mirror)
+        self.assertIn("*DEBUG*", mirror)
+        self.assertIn("*Abort message*", mirror)
+        self.assertIn('printf \'<6>PORTABLE-LOGCAT %.900s\\n\' "$line"', mirror)
+        self.assertNotIn('\\${line:0:900}', mirror)
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):
         workflow = self.read(".github/workflows/main.yml")

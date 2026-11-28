@@ -11,8 +11,8 @@ done
 
 "$LOGCAT" -b all -v threadtime | while IFS= read -r line; do
     case "$line" in
-        *netd*|*BpfLoader*|*LibBpfLoader*|*libc*|*crash_dump*|*tombstoned*|*SurfaceFlinger*|*surfaceflinger*|*hwcomposer*|*HWC*|*adbd*|*AndroidRuntime*|*ConnectivityService*|*NetworkStack*|*system_server*)
-            printf '<6>PORTABLE-LOGCAT %s\n' "\${line:0:900}" > "$KMSG" 2>/dev/null || true
+        *netd*|*BpfLoader*|*LibBpfLoader*|*libc*|*crash_dump*|*tombstoned*|*debuggerd*|*DEBUG*|*Fatal signal*|*Abort message*|*backtrace*|*SIGABRT*|*SIGSEGV*|*SurfaceFlinger*|*surfaceflinger*|*hwcomposer*|*HWC*|*adbd*|*AndroidRuntime*|*ConnectivityService*|*NetworkStack*|*system_server*)
+            printf '<6>PORTABLE-LOGCAT %.900s\n' "$line" > "$KMSG" 2>/dev/null || true
             ;;
     esac
 done
