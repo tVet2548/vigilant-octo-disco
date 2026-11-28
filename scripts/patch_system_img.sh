@@ -753,6 +753,9 @@ for cls, perms in [
 
 for dev_t in ["dri_device", "gpu_device", "graphics_device", "ion_device", "dmabuf_system_heap_device", "kmsg_device", "device", "null_device", "zero_device"]:
     add_plat_allow("droidport_gfx", dev_t, "chr_file", "read write open getattr setattr ioctl map")
+# stdio_to_kmsg redirects the mirror service to this dedicated node. Keep the
+# permission scoped to droidport_gfx; do not grant kmsg_debug to every domain.
+add_plat_allow("droidport_gfx", "kmsg_debug_device", "chr_file", "write open getattr")
 
 add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin")
 add_plat_allow("droidport_gfx", "property_socket", "sock_file", "write")
@@ -1529,14 +1532,32 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
     done
   fi
 
-  # drmfb requires a real /dev/fb0 character node, not merely sysfs fb0.
-  # The DRM composer path requires an actual DRM card node; service files alone
-  # are not proof that this kernel exposes the device interface.
+  # DRM fbdev emulation may publish fb0 in sysfs before ueventd has created
+  # the devtmpfs node. Materialize the node from the kernel's authoritative
+  # major:minor value rather than silently falling back to a different HWC.
+  FB_DEV_NUMBER=""
+  if [ -r /sys/class/graphics/fb0/dev ]; then
+    FB_DEV_NUMBER=$(cat /sys/class/graphics/fb0/dev 2>/dev/null || true)
+  fi
+  if [ -n "$FB_DEV_NUMBER" ] && [ ! -c /dev/fb0 ]; then
+    FB_MAJOR=${FB_DEV_NUMBER%:*}
+    FB_MINOR=${FB_DEV_NUMBER#*:}
+    case "$FB_MAJOR:$FB_MINOR" in *[!0-9:]*|:*) _glog "WARN: invalid fb0 dev number '$FB_DEV_NUMBER'" ;; *)
+      mknod /dev/fb0 c "$FB_MAJOR" "$FB_MINOR" 2>/dev/null || true
+      chmod 0660 /dev/fb0 2>/dev/null || true
+      chown system:graphics /dev/fb0 2>/dev/null || true
+      restorecon /dev/fb0 2>/dev/null || true
+      ;;
+    esac
+  fi
+
+  # drmfb requires the actual fb0 character node, not merely its sysfs directory.
+  # The DRM composer path requires an actual DRM card node.
   HAS_FB=0
   [ -c /dev/fb0 ] && HAS_FB=1
   HAS_DRI=0
   [ -c /dev/dri/card0 ] && HAS_DRI=1
-  _glog "software_display fb0_node=${HAS_FB} dri_card_node=${HAS_DRI} fb0_driver=${FB_DRV}"
+  _glog "software_display fb0_node=${HAS_FB} fb0_dev=${FB_DEV_NUMBER:-none} dri_card_node=${HAS_DRI} fb0_driver=${FB_DRV}"
 
   if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; }; then
     setprop debug.sf.hwc_service_name drmfb
@@ -1663,6 +1684,55 @@ for p, ctx in pairs:
         os.setxattr(p, b"security.selinux", ctx.encode() + b"\x00", follow_symlinks=False)
 X2PY
 fi
+
+# Headless QEMU has no interactive VT. Strip only init-service `console`
+# options (not shell commands or action triggers) from every imported Android
+# init rc file. The PID-1 wrapper already gives init /dev/null on fds 0/1/2,
+# and kernel diagnostics are captured by earlycon/earlyprintk on the serial.
+python3 - "${WORK_DIR}/mnt" "${SYS_ROOT}" "${WORK_DIR}/vendor_mnt" <<'CONSOLEPY'
+import pathlib, re, sys
+
+roots = [pathlib.Path(x) for x in sys.argv[1:] if x]
+seen = set()
+changed_files = []
+removed = 0
+for root in roots:
+    if not root.exists():
+        continue
+    for rc in root.rglob("*.rc"):
+        try:
+            key = rc.resolve()
+        except OSError:
+            key = rc
+        if key in seen or not rc.is_file():
+            continue
+        seen.add(key)
+        try:
+            lines = rc.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        except OSError:
+            continue
+        out = []
+        in_service = False
+        local_removed = 0
+        for line in lines:
+            stripped = line.strip()
+            top_level = bool(line) and not line[0].isspace() and stripped and not stripped.startswith("#")
+            if top_level:
+                in_service = stripped.startswith("service ")
+            if in_service and re.fullmatch(r"console(?:\s+\S+)?", stripped):
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + "# DroidPort headless CI: console option removed; inherit /dev/null\n")
+                local_removed += 1
+            else:
+                out.append(line)
+        if local_removed:
+            rc.write_text("".join(out), encoding="utf-8")
+            changed_files.append((str(rc), local_removed))
+            removed += local_removed
+print(f"Headless init RC sanitation: removed {removed} service console option(s) from {len(changed_files)} file(s).")
+for filename, count in changed_files:
+    print(f"  {filename}: {count}")
+CONSOLEPY
 
 # Unmount & re-compress vendor.img if modified
 if [ "${HAS_VENDOR_RW}" -eq 1 ]; then
