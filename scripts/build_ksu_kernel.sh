@@ -423,6 +423,10 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       --enable CONFIG_ANDROID_BINDERFS \
       --set-str CONFIG_ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
       --enable CONFIG_NET \
+      --enable CONFIG_NETDEVICES \
+      --enable CONFIG_ETHERNET \
+      --enable CONFIG_NET_VENDOR_INTEL \
+      --enable CONFIG_E1000 \
       --enable CONFIG_PACKET \
       --enable CONFIG_UNIX \
       --enable CONFIG_INET \

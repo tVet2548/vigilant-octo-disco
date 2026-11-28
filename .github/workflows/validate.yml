@@ -1,0 +1,44 @@
+name: Validate source and QEMU pipeline contracts
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: |
+          python -m py_compile \
+            src/launcher.py \
+            src/spoof_device.py \
+            scripts/generate_icon.py \
+            tests/test_pipeline_contract.py
+
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n scripts/build_exe_wine.sh
+          bash -n scripts/build_ksu_kernel.sh
+          bash -n scripts/cleanup_disk.sh
+          bash -n scripts/fetch_assets.sh
+          bash -n scripts/patch_system_img.sh
+
+      - name: Run pipeline contract tests
+        run: python -m unittest discover -s tests -v

@@ -1531,6 +1531,7 @@ on boot
     setprop debug.hwui.renderer opengl
 
 on property:sys.boot_completed=1
+    write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"
     exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
 EOF
   chmod 0644 "${INIT_DIR}/init.portable_selinux.rc"

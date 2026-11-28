@@ -1,60 +1,118 @@
-name: Extract and Force Commit Chess4
+name: Safely extract uploaded ZIP
 
 on:
   push:
     paths:
-      - 'Chess4.zip'
-  workflow_dispatch: # Cho phép bấm chạy thủ công trên tab Actions
+      - "Chess4.zip"
+      - "imz.zip"
+  workflow_dispatch:
 
 permissions:
-  contents: write # Cấp quyền ghi để commit và push lên repo
+  contents: write
+
+concurrency:
+  group: safe-zip-extract-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  extract-and-push:
+  extract-and-commit:
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Lấy đầy đủ lịch sử git để tránh lỗi khi force push
+          fetch-depth: 0
 
-      - name: Process Chess4.zip
+      - name: Validate and safely extract archive
+        shell: bash
         run: |
-          # 1. Tìm file Chess4.zip tại thư mục gốc (root)
-          if [ ! -f "./imz.zip" ]; then
-            echo "Không tìm thấy Chess4.zip ở thư mục gốc."
-            exit 1
-          fi
+          set -Eeuo pipefail
 
-          # 2. Giải nén (ghi đè nếu file đã tồn tại)
-          unzip -o ./imz.zip -d ./
-
-          # 3. Cấu hình Git bot
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@://github.com"
-
-          # 4. Stage toàn bộ file vừa giải nén (tạm loại trừ Chess4.zip để xử lý sau)
-          git add -A
-          git reset -- imz.zip
-
-          # 5. Commit và Force Push nếu có thay đổi
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: extract Chess4.zip"
-            
-            # Nếu push thành công thì xóa Chess4.zip và cập nhật lại commit
-            if git push --force origin HEAD:${{ github.ref_name }}; then
-              rm -f ./imz.zip
-              git add -A
-              git commit --amend --no-edit
-              git push --force origin HEAD:${{ github.ref_name }}
-              echo "Giải nén, push thành công và đã xóa Chess4.zip."
-            else
-              echo "Lỗi: Force push thất bại."
-              exit 1
-            fi
+          ARCHIVE=""
+          if [[ -f "Chess4.zip" ]]; then
+            ARCHIVE="Chess4.zip"
+          elif [[ -f "imz.zip" ]]; then
+            ARCHIVE="imz.zip"
           else
-            echo "Không có thay đổi mới sau khi giải nén."
-            exit 1
+            echo "No archive is present (the upload may already have been processed); nothing to do."
+            exit 0
           fi
-          
+          echo "Selected archive: ${ARCHIVE}"
+
+          python3 - "${ARCHIVE}" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path(sys.argv[1])
+          root = Path.cwd().resolve()
+          max_members = 20_000
+          max_uncompressed = 2 * 1024 * 1024 * 1024
+
+          with zipfile.ZipFile(archive) as zf:
+              members = zf.infolist()
+              if len(members) > max_members:
+                  raise SystemExit(f"Archive has too many entries: {len(members)}")
+
+              total_size = sum(info.file_size for info in members)
+              if total_size > max_uncompressed:
+                  raise SystemExit(
+                      f"Archive expands beyond 2 GiB: {total_size} uncompressed bytes"
+                  )
+
+              for info in members:
+                  raw_name = info.filename
+                  normalized = raw_name.replace("\\", "/")
+                  trimmed = normalized.rstrip("/")
+                  member = PurePosixPath(trimmed)
+                  mode = (info.external_attr >> 16) & 0o170000
+                  parts = trimmed.split("/")
+
+                  if (
+                      not trimmed
+                      or "\x00" in normalized
+                      or normalized.startswith("/")
+                      or member.is_absolute()
+                      or any(part in ("", ".", "..") for part in parts)
+                      or (len(trimmed) > 1 and trimmed[1] == ":")
+                      or parts[0] == ".git"
+                  ):
+                      raise SystemExit(f"Unsafe archive path rejected: {raw_name!r}")
+                  if mode == stat.S_IFLNK:
+                      raise SystemExit(f"Symlink entry rejected: {raw_name!r}")
+
+                  target = (root / Path(*member.parts)).resolve()
+                  if target != root and root not in target.parents:
+                      raise SystemExit(f"Path escapes repository root: {raw_name!r}")
+
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with zf.open(info) as src, target.open("wb") as dst:
+                      while chunk := src.read(1024 * 1024):
+                          dst.write(chunk)
+
+          print(
+              f"Safely extracted {len(members)} entries "
+              f"({total_size} uncompressed bytes)."
+          )
+          PY
+
+          rm -f -- "${ARCHIVE}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Archive produced no repository changes; nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: safely extract uploaded archive"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
