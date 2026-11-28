@@ -91,7 +91,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn("seclabel u:r:droidport_gfx:s0", patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logcat_exec", "file"', patch)
-        self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file"', patch)
+        self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
         self.assertIn('"ctl_start_prop"', patch)
         self.assertIn('"exported_config_prop"', patch)

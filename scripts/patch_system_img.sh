@@ -779,7 +779,7 @@ add_plat_allow("toolbox", "toolbox_exec", "file", "read open getattr execute exe
 add_plat_allow("toolbox", "logdr_socket", "sock_file", "write")
 add_plat_allow("toolbox", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "logcat_exec", "file", "read open getattr execute execute_no_trans map")
-add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "write")
+add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")
 add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "property_socket", "sock_file", "write")
 add_plat_allow("toolbox", "init", "unix_stream_socket", "connectto")
