@@ -461,6 +461,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
       --enable CONFIG_NETFILTER_XT_TARGET_NFQUEUE \
       --enable CONFIG_NETFILTER_XT_MATCH_COMMENT \
       --enable CONFIG_NETFILTER_XT_MATCH_CONNTRACK \
+      --enable CONFIG_NETFILTER_XT_MATCH_BPF \
       --enable CONFIG_NETFILTER_XT_MATCH_LENGTH \
       --enable CONFIG_NETFILTER_XT_MATCH_LIMIT \
       --enable CONFIG_NETFILTER_XT_MATCH_MAC \
@@ -756,6 +757,7 @@ if "X86_FEATURE_INDIRECT_SAFE" not in t:
     grep -q '^# CONFIG_KSU is not set' .config
     grep -q '^CONFIG_DRM_VIRTIO_GPU=y' .config
     grep -q '^CONFIG_E1000=y' .config
+    grep -q '^CONFIG_NETFILTER_XT_MATCH_BPF=y' .config
     printf 'no-KSU;CONFIG_DRM_VIRTIO_GPU=y;CONFIG_E1000=y;source=%s\n' "${STOCK_MAJMIN}" > "${IMG_DIR}/kernel_stock.meta"
     echo "Verified no-KSU kernel_stock: $(stat -c%s "${IMG_DIR}/kernel_stock") bytes (${STOCK_TYPE})"
   }
