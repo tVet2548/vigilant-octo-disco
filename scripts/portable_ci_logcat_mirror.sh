@@ -32,6 +32,7 @@ while true; do
                 ;;
         esac
     done
-    emit "logcat stream ended (exit=$?); retrying in 2 seconds"
+    logcat_status=${PIPESTATUS:-unknown}
+    emit "logcat stream ended; pipeline status=$logcat_status; retrying in 2 seconds"
     /system/bin/sleep 2
 done
