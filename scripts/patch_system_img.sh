@@ -759,6 +759,18 @@ for prop_t in ["system_prop", "exported_system_prop", "default_prop", "vendor_de
     add_plat_allow("droidport_gfx", prop_t, "file", "read open getattr map")
 
 # Graphics allocator reads standard display/allocator properties and device topology.
+# Renderer/GBM and DRM ioctls execute in platform surfaceflinger domain.
+for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
+    add_plat_allow(_sf_domain, "gpu_device", "chr_file", "read write open getattr ioctl map")
+    add_plat_allow(_sf_domain, "graphics_device", "chr_file", "read write open getattr ioctl map")
+    add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
+
+# Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
+add_plat_allow("hal_graphics_allocator_default", "device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "tty_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "gpu_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "graphics_device", "chr_file", "read write open getattr ioctl map")
+add_plat_allow("hal_graphics_allocator_default", "dri_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("hal_graphics_allocator_default", "default_prop", "file", "read open getattr map")
 add_plat_allow("hal_graphics_allocator_default", "system_prop", "file", "read open getattr map")
 add_plat_allow("hal_graphics_allocator_default", "sysfs", "dir", "read open getattr search")
@@ -809,6 +821,12 @@ add_plat_allow("toolbox", "toolbox_exec", "file", "read open getattr execute exe
 add_plat_allow("toolbox", "logdr_socket", "sock_file", "write")
 add_plat_allow("toolbox", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "logcat_exec", "file", "read open getattr execute execute_no_trans map")
+add_plat_allow("droidport_gfx", "logd", "process", "sigchld")
+add_plat_allow("droidport_gfx", "logd", "fd", "use")
+add_plat_allow("droidport_gfx", "logd", "dir", "search getattr")
+add_plat_allow("droidport_gfx", "logd", "file", "read open getattr map")
+add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")
+add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")
 add_plat_allow("droidport_gfx", "logd", "unix_stream_socket", "connectto")
 add_plat_allow("toolbox", "property_socket", "sock_file", "write")
@@ -849,7 +867,13 @@ if ven_cil_path.is_file():
 
     # These graphics allocator rules must live in vendor policy: the allocator
     # type belongs to the vendor policy namespace, so plat-only allows are dropped.
+    add_ven_allow(("surfaceflinger", f"surfaceflinger_{plat_ver.replace('.', '_')}"), (f"gpu_device_{plat_ver.replace('.', '_')}", "gpu_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("surfaceflinger", f"surfaceflinger_{plat_ver.replace('.', '_')}"), (f"graphics_device_{plat_ver.replace('.', '_')}", "graphics_device"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_allocator_default",), (f"default_prop_{plat_ver.replace('.', '_')}", "default_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"system_prop_{plat_ver.replace('.', '_')}", "system_prop"), "file", "read open getattr map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"gpu_device_{plat_ver.replace('.', '_')}", "gpu_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"graphics_device_{plat_ver.replace('.', '_')}", "graphics_device"), "chr_file", "read write open getattr ioctl map")
+    add_ven_allow(("hal_graphics_allocator_default",), (f"device_{plat_ver.replace('.', '_')}", "device"), "chr_file", "read write open getattr ioctl map")
     add_ven_allow(("hal_graphics_allocator_default",), (f"tty_device_{plat_ver.replace('.', '_')}", "tty_device"), "chr_file", "read write open getattr ioctl")
     add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "dir", "read open getattr search")
     add_ven_allow(("hal_graphics_allocator_default",), (f"sysfs_{plat_ver.replace('.', '_')}", "sysfs"), "file", "read open getattr")
