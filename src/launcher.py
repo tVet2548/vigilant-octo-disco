@@ -1030,6 +1030,17 @@ class PortableAndroidLauncher(BaseCTk):
                 if not clean:
                     continue
                 low = clean.lower()
+                netd_exit = re.search(r"Service 'netd'.*exited with status ([1-9]\d*)", clean, re.IGNORECASE)
+                if netd_exit:
+                    boot_state["netd_fail_count"] = boot_state.get("netd_fail_count", 0) + 1
+                    boot_state["last_netd_exit_status"] = int(netd_exit.group(1))
+                    console_log(
+                        f"[NETWORK/FATAL] netd exited with status {netd_exit.group(1)}; "
+                        "Android init may restart zygote. Preserve logs/android-logcat.log for root-cause analysis."
+                    )
+                if "[portable-boot] boot_completed=1" in low:
+                    boot_state["boot_complete_seen"] = True
+                    console_log("[ANDROID/BOOT] sys.boot_completed=1 confirmed by init marker.")
                 if "early console in extract_kernel" in low:
                     boot_state["decompressor_count"] = boot_state.get("decompressor_count", 0) + 1
                 if "executing: exec" in low and "switch_root" in low:
@@ -1154,7 +1165,7 @@ class PortableAndroidLauncher(BaseCTk):
         )
 
         # Intel Core i5-3475S (Ivy Bridge, NO AVX2/AVX512/BMI2) CPU + Hypervisor Matrix
-        ivy_cpu = "IvyBridge,+ssse3,+sse4.1,+sse4.2,+popcnt"
+        ivy_cpu = "IvyBridge,-ht,-tsc-deadline,+ssse3,+sse4.1,+sse4.2,+popcnt"
         if tier_id in ("whpx_host", "whpx_host_stock"):
             machine_arg = "q35,hpet=off" if use_hpet_off else "q35"
             accel_args = ["-accel", "whpx,kernel-irqchip=off", "-cpu", "host"]
@@ -1191,16 +1202,16 @@ class PortableAndroidLauncher(BaseCTk):
         # Default Auto: virtio-vga (DRM llvmpipe, gl=off, EDID 1280x720) -> -vga std (gl=off)
         # Experimental VirGL: virtio-vga-gl (gl=es/ANGLE) -> virtio-vga-gl (gl=on) -> virtio-vga (llvmpipe) -> -vga std
         if use_virgl and gl_device_mode == "vga_gl":
-            cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=es"]
+            cmd += ["-device", "virtio-vga-gl", "-display", "sdl,gl=es"]
             gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "vga_gl_desktop":
-            cmd += ["-device", "virtio-vga-gl,xres=1280,yres=720", "-display", "sdl,gl=on"]
+            cmd += ["-device", "virtio-vga-gl", "-display", "sdl,gl=on"]
             gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "gpu_gl_pci":
-            cmd += ["-vga", "none", "-device", "virtio-gpu-gl-pci,xres=1280,yres=720", "-display", "sdl,gl=on"]
+            cmd += ["-vga", "none", "-device", "virtio-gpu-gl-pci", "-display", "sdl,gl=on"]
             gfx_cmdline = "HWACCEL=1"
         elif gl_device_mode == "virtio_sw":
-            cmd += ["-device", "virtio-vga,xres=1280,yres=720", "-display", "sdl,gl=off"]
+            cmd += ["-device", "virtio-vga", "-display", "sdl,gl=off"]
             gfx_cmdline = "HWACCEL=0 MESA_LLVMPIPE=1 EGL=mesa HWC_HIDL=drmfb"
         else:
             cmd += ["-vga", "std", "-display", "sdl,gl=off"]
@@ -1219,8 +1230,8 @@ class PortableAndroidLauncher(BaseCTk):
             "-audiodev", "dsound,id=snd0",
             "-device", "ich9-intel-hda",
             "-device", "hda-duplex,audiodev=snd0",
-            "-netdev", "user,id=net0,hostfwd=tcp::5555-:5555",
-            "-device", "virtio-net-pci,netdev=net0",
+            "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:5555-:5555",
+            "-device", "e1000,netdev=net0",
             "-drive", f"file={system_file},if=virtio,format=qcow2,cache=writeback,readonly=on",
             "-drive", f"file={vendor_file},if=virtio,format=qcow2,cache=writeback,readonly=on",
             "-drive", f"file={data_file},if=virtio,format=qcow2,cache=writeback",
@@ -1531,6 +1542,9 @@ class PortableAndroidLauncher(BaseCTk):
                     "gfx_init_seen": False,
                     "hwc_fail_count": 0,
                     "sf_fail_count": 0,
+                    "netd_fail_count": 0,
+                    "last_netd_exit_status": None,
+                    "boot_complete_seen": False,
                     "gfx_loop_detected": False,
                     "last_serial_ts": start_ts,
                     "decompressor_count": 0,
@@ -1864,19 +1878,55 @@ class PortableAndroidLauncher(BaseCTk):
         console_log("[ADB] Streaming adb logcat...")
         self.after(500, self.refresh_installed_apps)
 
-        self.logcat_process = subprocess.Popen(
-            [str(self.adb_exe), "-s", "127.0.0.1:5555", "logcat", "-v", "time", "*:W"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-            creationflags=_no_window_flags(),
-        )
-        assert self.logcat_process.stdout is not None
-        for line in self.logcat_process.stdout:
-            if self.stop_log_threads.is_set():
-                break
-            clean = line.rstrip("\r\n")
-            if clean:
-                console_log(f"[LOGCAT] {clean}")
-
+        log_dir = BASE_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "android-logcat.log"
+        previous_log = log_dir / "android-logcat.previous.log"
+        max_log_bytes = 32 * 1024 * 1024
+        log_file = None
+        try:
+            log_file = log_path.open("w", encoding="utf-8", errors="replace", buffering=1)
+            self.logcat_process = subprocess.Popen(
+                [
+                    str(self.adb_exe), "-s", "127.0.0.1:5555",
+                    "logcat", "-b", "all", "-v", "threadtime",
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                creationflags=_no_window_flags(),
+            )
+            assert self.logcat_process.stdout is not None
+            console_log(f"[ADB] Full logcat buffers enabled; writing diagnostics to {log_path}.")
+            for line in self.logcat_process.stdout:
+                if self.stop_log_threads.is_set():
+                    break
+                clean = line.rstrip("\\r\\n")
+                if not clean:
+                    continue
+                log_file.write(clean + "\\n")
+                if log_file.tell() >= max_log_bytes:
+                    log_file.close()
+                    previous_log.unlink(missing_ok=True)
+                    if log_path.exists():
+                        log_path.replace(previous_log)
+                    log_file = log_path.open("w", encoding="utf-8", errors="replace", buffering=1)
+                    console_log("[ADB] Rotated full logcat; previous capture saved as logs/android-logcat.previous.log.")
+                if (
+                    re.search(r"\\s[EWFA]\\s", clean)
+                    or re.search(
+                        r"\\b(netd|NetworkStack|ConnectivityService|IpClient|BpfLoader|crash_dump|tombstoned)\\b",
+                        clean,
+                        re.IGNORECASE,
+                    )
+                ):
+                    console_log(f"[LOGCAT] {clean}")
+        except Exception as exc:
+            console_log(f"[ADB/LOGCAT] Failed to capture full Android logcat: {exc}")
+        finally:
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
     def _stop_logcat(self) -> None:
         if self.logcat_process and self.logcat_process.poll() is None:
             try:
