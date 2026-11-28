@@ -789,9 +789,8 @@ add_plat_allow("hal_graphics_allocator_default", "sysfs", "lnk_file", "read geta
 # SurfaceFlinger & BootAnimation DRM/GPU/tty0/sysfs/prop permissions
 add_plat_allow("surfaceflinger", "gpu_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "tty_device", "chr_file", "read write open getattr ioctl")
-add_plat_allowxperm("surfaceflinger", "tty_device", "chr_file", "0x4b3a 0x5603")
-add_plat_allowxperm("surfaceflinger", "device", "chr_file", "0x4b3a 0x5603")
-add_plat_allowxperm("surfaceflinger", "gpu_device", "chr_file", "0x4b3a 0x5603")
+# tty0 is the Android init default-console leak; androidboot.console=null
+# removes the dependency instead of granting SurfaceFlinger VT ioctls.
 add_plat_allow("surfaceflinger", "graphics_device", "chr_file", "read write open getattr ioctl map")
 add_plat_allow("surfaceflinger", "device", "chr_file", "read write open getattr ioctl")
 add_plat_allow("surfaceflinger", "sysfs", "dir", "read open getattr search")
