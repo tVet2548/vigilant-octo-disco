@@ -1529,6 +1529,9 @@ on post-fs-data
 
 on boot
     setprop debug.hwui.renderer opengl
+    # Loopback-only ADB TCP is used by the launcher and CI diagnostics.
+    setprop persist.sys.usb.config adb
+    setprop service.adb.tcp.port 5555
 
 on property:sys.boot_completed=1
     write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"
