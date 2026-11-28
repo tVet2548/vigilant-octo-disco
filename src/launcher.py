@@ -1883,6 +1883,7 @@ class PortableAndroidLauncher(BaseCTk):
         log_path = log_dir / "android-logcat.log"
         previous_log = log_dir / "android-logcat.previous.log"
         max_log_bytes = 32 * 1024 * 1024
+        log_bytes_written = 0
         log_file = None
         try:
             log_file = log_path.open("w", encoding="utf-8", errors="replace", buffering=1)
@@ -1899,21 +1900,23 @@ class PortableAndroidLauncher(BaseCTk):
             for line in self.logcat_process.stdout:
                 if self.stop_log_threads.is_set():
                     break
-                clean = line.rstrip("\\r\\n")
+                clean = line.rstrip("\r\n")
                 if not clean:
                     continue
-                log_file.write(clean + "\\n")
-                if log_file.tell() >= max_log_bytes:
+                log_file.write(clean + "\n")
+                log_bytes_written += len((clean + "\n").encode("utf-8", errors="replace"))
+                if log_bytes_written >= max_log_bytes:
                     log_file.close()
                     previous_log.unlink(missing_ok=True)
                     if log_path.exists():
                         log_path.replace(previous_log)
                     log_file = log_path.open("w", encoding="utf-8", errors="replace", buffering=1)
+                    log_bytes_written = 0
                     console_log("[ADB] Rotated full logcat; previous capture saved as logs/android-logcat.previous.log.")
                 if (
-                    re.search(r"\\s[EWFA]\\s", clean)
+                    re.search(r"\s[EWFA]\s", clean)
                     or re.search(
-                        r"\\b(netd|NetworkStack|ConnectivityService|IpClient|BpfLoader|crash_dump|tombstoned)\\b",
+                        r"\b(netd|NetworkStack|ConnectivityService|IpClient|BpfLoader|crash_dump|tombstoned)\b",
                         clean,
                         re.IGNORECASE,
                     )
