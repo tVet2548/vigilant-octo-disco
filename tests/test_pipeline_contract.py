@@ -102,6 +102,13 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
             self.assertIn(name, smoke)
         self.assertIn('"$ADB_BIN" -s "$ADB_SERIAL" shell getprop', smoke)
 
+    def test_ci_drmfb_hwc_requires_a_real_framebuffer(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn('HAS_FB=0', patch)
+        self.assertIn('[ -e /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]', patch)
+        self.assertIn('if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ]', patch)
+        self.assertIn('setprop portable.hwc.svc v21', patch)
+
     def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
         self.assertIn("*debuggerd*", mirror)

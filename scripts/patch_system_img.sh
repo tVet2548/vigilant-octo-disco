@@ -1449,8 +1449,15 @@ if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
     done
   fi
 
-  # Prefer Bliss drmfb service in 2D/SW mode if installed, otherwise single active composer
-  if [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; then
+  # The drmfb HWC needs a real fbdev node. A vendor RC/service file alone is
+  # not evidence that this kernel exposed fb0 (stock kernel in CI has no fb0).
+  HAS_FB=0
+  if [ -e /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]; then
+    HAS_FB=1
+  fi
+  _glog "software_display fb0_present=${HAS_FB} fb0_driver=${FB_DRV}"
+
+  if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ] || ls /vendor/etc/init/*drmfb*.rc >/dev/null 2>&1; }; then
     setprop debug.sf.hwc_service_name drmfb
     setprop portable.hwc.svc drmfb
   elif [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-service ] || ls /vendor/etc/init/*composer@2.1-service.rc >/dev/null 2>&1; then
