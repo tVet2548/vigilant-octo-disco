@@ -15,12 +15,15 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertNotIn("hostfwd=tcp::5555-:5555", source)
         self.assertNotIn('"virtio-net-pci,netdev=net0"', source)
 
-    def test_software_virtio_mode_does_not_force_custom_modeline(self):
+    def test_software_virtio_mode_uses_real_headless_display(self):
         source = self.read("src/launcher.py")
-        workflow = self.read(".github/workflows/build.yml")
+        smoke = self.read("scripts/qemu_boot_smoke.sh")
         self.assertIn('"-device", "virtio-vga", "-display", "sdl,gl=off"', source)
+        self.assertIn("-display sdl,gl=off", smoke)
+        self.assertIn("xvfb-run -a", smoke)
+        self.assertNotIn("-display none", smoke)
         self.assertNotIn("xres=1280,yres=720", source)
-        self.assertNotIn("xres=1280,yres=720", workflow)
+        self.assertNotIn("xres=1280,yres=720", smoke)
 
     def test_tcg_cpu_does_not_request_unavailable_features(self):
         source = self.read("src/launcher.py")
@@ -52,17 +55,39 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("[portable-boot] boot_completed=1", launcher.lower())
         self.assertIn('write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"', patch)
 
-    def test_ci_waits_for_android_boot_and_checks_post_boot_stability(self):
+    def test_ci_boot_gate_checks_runtime_crashes_adb_and_dhcp(self):
         workflow = self.read(".github/workflows/build.yml")
-        self.assertIn("BOOT_TIMEOUT_SECONDS=900", workflow)
-        self.assertIn("SOAK_SECONDS=90", workflow)
-        self.assertIn("[PORTABLE-BOOT] BOOT_COMPLETED=1", workflow)
-        self.assertIn("Service 'netd'.*exited with status [1-9]", workflow)
-        self.assertIn("Service 'zygote(_secondary)?' exited with status [1-9]", workflow)
-        self.assertIn("-device e1000,netdev=net0", workflow)
-        self.assertIn("e1000 .*eth0:", workflow)
-        self.assertNotIn("seq 1 135", workflow)
+        smoke = self.read("scripts/qemu_boot_smoke.sh")
+        self.assertIn("BOOT_TIMEOUT_SECONDS", smoke)
+        self.assertIn("SOAK_SECONDS", smoke)
+        self.assertIn("[PORTABLE-BOOT] BOOT_COMPLETED=1", smoke)
+        self.assertIn("received signal (6|11)", smoke)
+        self.assertIn("Service 'netd'", smoke)
+        self.assertIn("hostfwd=tcp:127.0.0.1:5556-:5555", smoke)
+        self.assertIn("logcat -b all -v threadtime", smoke)
+        self.assertIn("ip route show default", smoke)
+        self.assertIn("-device e1000,netdev=net0", smoke)
+        self.assertIn("xvfb-run -a", smoke)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("qemu-android-diagnostics", workflow)
         self.assertIn("sys.boot_completed", self.read("docs/boot-diagnostics.md"))
+
+    def test_android_boot_does_not_assign_framework_console_to_uart(self):
+        smoke = self.read("scripts/qemu_boot_smoke.sh")
+        self.assertIn("console=ttyS0,115200", smoke)
+        self.assertNotIn("androidboot.console=ttyS0", smoke)
+        self.assertNotIn("SERIAL=ttyS0", smoke)
+
+    def test_portable_image_enables_adb_tcp(self):
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn("setprop persist.sys.usb.config adb", patch)
+        self.assertIn("setprop service.adb.tcp.port 5555", patch)
+
+    def test_qemu_smoke_persists_serial_qemu_logcat_and_guest_state(self):
+        smoke = self.read("scripts/qemu_boot_smoke.sh")
+        for name in ("serial.log", "qemu.stderr.log", "qemu.debug.log", "guest.logcat.log", "guest-state.log"):
+            self.assertIn(name, smoke)
+        self.assertIn("adb shell getprop", smoke)
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):
         workflow = self.read(".github/workflows/main.yml")
