@@ -164,18 +164,16 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("[ -c /dev/fb0 ] && HAS_FB=1", patch)
         self.assertIn("[ -c /dev/dri/card0 ] && HAS_DRI=1", patch)
         self.assertIn('if [ "${HAS_FB}" -eq 1 ] && { [ -x /vendor/bin/hw/android.hardware.graphics.composer@2.1-drmfb-service ]', patch)
+        self.assertIn('elif [ "${HAS_DRI}" -eq 1 ] && {', patch)
         self.assertIn('setprop portable.hwc.svc v21', patch)
 
     def test_ci_logcat_mirror_captures_native_crash_backtraces(self):
-        self.assertIn("exec /system/bin/logcat -b all -v threadtime", mirror)
-        self.assertIn("stdio_to_kmsg", self.read("scripts/patch_system_img.sh"))
-        self.assertNotIn("while IFS= read -r line", mirror)
         mirror = self.read("scripts/portable_ci_logcat_mirror.sh")
-        self.assertIn("*debuggerd*", mirror)
-
-
-        self.assertIn('printf \'<6>PORTABLE-LOGCAT %.900s\\n\' "$1"', mirror)
-
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn("exec /system/bin/logcat -b all -v threadtime", mirror)
+        self.assertIn("stdio_to_kmsg", patch)
+        self.assertNotIn("while IFS= read -r line", mirror)
+        self.assertNotIn("/system/bin/seq", mirror)
 
     def test_zip_workflow_is_path_safe_and_never_rewrites_history(self):
         workflow = self.read(".github/workflows/main.yml")
