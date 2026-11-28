@@ -46,6 +46,14 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn("--enable CONFIG_NET_VENDOR_INTEL", source)
         self.assertIn("--enable CONFIG_E1000", source)
 
+    def test_android13_netd_xt_bpf_match_is_available_in_userspace_and_kernel(self):
+        kernel = self.read("scripts/build_ksu_kernel.sh")
+        patch = self.read("scripts/patch_system_img.sh")
+        self.assertIn("--enable CONFIG_NETFILTER_XT_MATCH_BPF", kernel)
+        self.assertIn("grep -q '^CONFIG_NETFILTER_XT_MATCH_BPF=y' .config", kernel)
+        self.assertIn('find "${BLISS_SYS_ROOT}" -type f -name "libxt_bpf.so"', patch)
+        self.assertIn("Installed missing Android xt_bpf userspace match", patch)
+
     def test_full_logcat_is_persisted_with_real_line_endings(self):
         source = self.read("src/launcher.py")
         self.assertIn('"logcat", "-b", "all", "-v", "threadtime"', source)
