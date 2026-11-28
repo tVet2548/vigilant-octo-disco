@@ -266,6 +266,27 @@ if [ -s "/tmp/bliss_system_fallback.img" ]; then
   fi
 fi
 
+# Android 13 netd's initial firewall transaction contains the xt_bpf match.
+# The Lineage GSI's iptables-restore reports "Couldn't find match bpf" when
+# its Bionic xtables plugin is absent. Reuse the API-33 x86_64 donor plugin
+# from the already extracted Bliss system image, preserving its xtables path.
+if [ -n "${BLISS_SYS_ROOT}" ]; then
+  BLISS_XT_BPF=$(find "${BLISS_SYS_ROOT}" -type f -name "libxt_bpf.so" -print -quit 2>/dev/null || true)
+  if [ -n "${BLISS_XT_BPF}" ]; then
+    XT_BPF_REL="${BLISS_XT_BPF#${BLISS_SYS_ROOT}/}"
+    TARGET_XT_BPF="${SYS_ROOT}/${XT_BPF_REL}"
+    mkdir -p "$(dirname "${TARGET_XT_BPF}")"
+    if [ ! -s "${TARGET_XT_BPF}" ]; then
+      cp -p "${BLISS_XT_BPF}" "${TARGET_XT_BPF}"
+      echo "Installed missing Android xt_bpf userspace match: ${XT_BPF_REL}"
+    else
+      echo "Lineage already provides xt_bpf userspace match: ${XT_BPF_REL}"
+    fi
+  else
+    echo "WARNING: Bliss donor has no libxt_bpf.so; kernel xt_bpf support will still be enabled and verified."
+  fi
+fi
+
 VENDOR_RAW="${WORK_DIR}/vendor_raw.img"
 HAS_VENDOR_RW=0
 if [ -s "${IMG_DIR}/vendor.img" ]; then
@@ -758,6 +779,7 @@ for dev_t in ["dri_device", "gpu_device", "graphics_device", "ion_device", "dmab
 add_plat_allow("droidport_gfx", "kmsg_debug_device", "chr_file", "write open getattr")
 
 add_plat_allow("droidport_gfx", "self", "capability", "chown fowner fsetid dac_override dac_read_search sys_admin")
+add_plat_allow("droidport_gfx", "file_contexts_file", "file", "read open getattr map")
 add_plat_allow("droidport_gfx", "property_socket", "sock_file", "write")
 add_plat_allow("droidport_gfx", "init", "unix_stream_socket", "connectto")
 add_plat_allow("droidport_gfx", "init", "fd", "use")
