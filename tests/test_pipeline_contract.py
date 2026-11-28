@@ -94,7 +94,7 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('add_plat_allow("droidport_gfx", "logdr_socket", "sock_file", "getattr write")', patch)
         self.assertIn('add_plat_allow("droidport_gfx", "logd", "unix_stream_socket"', patch)
         self.assertIn('add_ven_allow(("hal_graphics_composer_default",), "self", "capability", "net_admin")', patch)
-        self.assertIn('add_ven_allow(("hal_graphics_allocator_default",), ("default_prop",', patch)
+        self.assertIn('add_ven_allow(("hal_graphics_allocator_default",), (f"default_prop_{plat_ver.replace', patch)
         self.assertIn('ro.adb.secure=0', patch)
         self.assertIn('persist.adb.tcp.port=5555', patch)
         self.assertIn('"ctl_start_prop"', patch)
