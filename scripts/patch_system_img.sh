@@ -795,10 +795,10 @@ for _sf_domain in ["surfaceflinger", "surfaceflinger_service"]:
     add_plat_allow(_sf_domain, "gpu_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "graphics_device", "chr_file", "read write open getattr ioctl map")
     add_plat_allow(_sf_domain, "dri_device", "chr_file", "read write open getattr ioctl map")
-# The captured KSU AVCs identify DRM ioctls 0x6400, 0x6443 and 0x640c
-# on renderD128. Grant only these observed commands, not the whole ioctl space.
-add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x6443")
-add_plat_allowx("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x6443")
+# Grant only DRM ioctls observed in the QEMU serial AVCs, not the whole ioctl space.
+# 0x642e is issued against renderD128 by Mesa EGL; 0x64a0 against card0 by SurfaceFlinger.
+add_plat_allowx("surfaceflinger", "gpu_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")
+add_plat_allowx("surfaceflinger", "dri_device", "chr_file", "0x6400 0x640c 0x642e 0x6443 0x64a0")
 
 # Vendor gralloc probes fb0/tty0, graphics devices, dma-buf and sysfs topology.
 add_plat_allow("hal_graphics_allocator_default", "device", "chr_file", "read write open getattr ioctl map")
@@ -1525,6 +1525,10 @@ esac
 _glog "fb0_driver=${FB_DRV} dri=[${DRI_LIST}] 3d_render=${HAS_RENDER} cmd_hwaccel=${REQ_HWACCEL:-auto} cur_hwc=$(getprop ro.hardware.hwcomposer) cur_gralloc=$(getprop ro.hardware.gralloc) cur_egl=$(getprop ro.hardware.egl)"
 
 if [ "${REQ_HWACCEL}" = "0" ] || [ "${HAS_RENDER}" -eq 0 ]; then
+  # The API-33 SkiaGL cache priming path crashes in the Bliss Mesa EGL stack
+  # while importing AHardwareBuffer on software-rendered QEMU. GLES is the
+  # supported AOSP RenderEngine override and avoids the SkiaGL prime-cache path.
+  setprop debug.renderengine.backend gles
   if echo "${CMDLINE}" | grep -q 'MESA_LLVMPIPE=1'; then
     setprop mesa.libgl.always.software true
     setprop ro.hardware.egl mesa
@@ -1620,7 +1624,7 @@ else
     setprop portable.hwc.svc v24
   fi
 fi
-_glog "final hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
+_glog "final renderengine=$(getprop debug.renderengine.backend) hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
 EOF
   chmod 0755 "${SYS_ROOT}/etc/init.portable_graphics.sh"
   CI_LOGCAT_SCRIPT="${SYS_ROOT}/etc/init.portable_ci_logcat.sh"
