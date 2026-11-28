@@ -288,7 +288,7 @@ jobs:
             wait "${QPID}" 2>/dev/null || true
 
             echo "--- Android boot, network and graphics diagnostics (${KNAME}) ---"
-            grep -iE 'PORTABLE-BOOT|init second stage|PORTABLE-GFX|netd|zygote|surfaceflinger|zygote|bootanim|e1000|eth0|dhcp|bpfloader|panic|FATAL|exited with status' "${LOGF}" 2>/dev/null | tail -n 120 || true
+            grep -iE 'PORTABLE-BOOT|init second stage|PORTABLE-GFX|netd|zygote|surfaceflinger|bootanim|e1000|eth0|dhcp|bpfloader|panic|FATAL|exited with status' "${LOGF}" 2>/dev/null | tail -n 120 || true
             echo "--- Tail of serial log ---"
             tail -n 80 "${LOGF}" 2>/dev/null || true
             echo "--- QEMU stderr ---"
