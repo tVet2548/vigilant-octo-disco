@@ -27,6 +27,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: portable-android-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   BUNDLE_DIR: dist_bundle
   ARCHIVE_PATH: dist/Portable_Android13_Win11.7z
