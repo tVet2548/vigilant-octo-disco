@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="$(realpath -m "${1:-dist_bundle}")"
 IMG_DIR="${BUNDLE_DIR}/images"
 WORK_DIR="/tmp/lineage_work"
@@ -1487,6 +1488,8 @@ fi
 _glog "final hwc=$(getprop ro.hardware.hwcomposer) gralloc=$(getprop ro.hardware.gralloc) egl=$(getprop ro.hardware.egl) hwc_svc=$(getprop debug.sf.hwc_service_name) target=$(getprop portable.hwc.svc)"
 EOF
   chmod 0755 "${SYS_ROOT}/etc/init.portable_graphics.sh"
+  CI_LOGCAT_SCRIPT="${SYS_ROOT}/etc/init.portable_ci_logcat.sh"
+  install -m 0755 "${SCRIPT_DIR}/portable_ci_logcat_mirror.sh" "${CI_LOGCAT_SCRIPT}"
 
   HWC_SVC_DRMFB="vendor.hwcomposer-2-1.drmfb"
   HWC_SVC_V21="vendor.hwcomposer-2-1"
@@ -1534,6 +1537,16 @@ on boot
     setprop service.adb.tcp.port 5555
     start adbd
 
+# CI-only fallback log capture when host ADB is unauthorized on a headless guest.
+service portable_ci_logcat_mirror /system/bin/sh /system/etc/init.portable_ci_logcat.sh
+    class late_start
+    user root
+    group log
+    disabled
+
+on property:ro.boot.portable_ci=1
+    start portable_ci_logcat_mirror
+
 on property:sys.boot_completed=1
     write /dev/kmsg "[PORTABLE-BOOT] BOOT_COMPLETED=1"
     exec u:r:droidport_gfx:s0 -- /system/bin/sh -c "if [ -x /data/adb/ksud ] && [ -e /sys/module/kernelsu -o -d /data/adb/ksu ]; then /data/adb/ksud boot-completed 2>/dev/null || true; fi"
@@ -1542,12 +1555,13 @@ EOF
   rm -f "/tmp/hwc_service_map.env"
 
   # Ensure xattrs on newly created init.portable_graphics.sh & init.portable_selinux.rc match updated plat_file_contexts
-  python3 - "${SYS_ROOT}/etc/init.portable_graphics.sh" "${INIT_DIR}/init.portable_selinux.rc" "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" <<'X2PY'
+  python3 - "${SYS_ROOT}/etc/init.portable_graphics.sh" "${INIT_DIR}/init.portable_selinux.rc" "${WORK_DIR}/mnt/sbin/droidport_init_wrapper" "${SYS_ROOT}/etc/init.portable_ci_logcat.sh" <<'X2PY'
 import os, sys
 pairs = [
     (sys.argv[1], "u:object_r:droidport_gfx_exec:s0"),
     (sys.argv[2], "u:object_r:system_file:s0"),
     (sys.argv[3], "u:object_r:init_exec:s0"),
+    (sys.argv[4], "u:object_r:system_file:s0"),
 ]
 for p, ctx in pairs:
     if os.path.exists(p):
