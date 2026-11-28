@@ -22,7 +22,10 @@ fi
 # exit with status 1 without leaving any explanation in the serial artifact.
 # Retry inside this process so init does not rapidly restart a failing service.
 while true; do
-    "$LOGCAT" -b all -v threadtime 2>&1 | while IFS= read -r line; do
+    # The command substitution preserves logcat exit status in this init shell.
+    logcat_output=$("$LOGCAT" -b all -v threadtime 2>&1)
+    logcat_status=$?
+    printf "%s\\n" "$logcat_output" | while IFS= read -r line; do
         case "$line" in
             *netd*|*BpfLoader*|*LibBpfLoader*|*libc*|*crash_dump*|*tombstoned*|*debuggerd*|*DEBUG*|*Fatal signal*|*Abort message*|*backtrace*|*SIGABRT*|*SIGSEGV*|*SurfaceFlinger*|*surfaceflinger*|*hwcomposer*|*HWC*|*adbd*|*AndroidRuntime*|*ConnectivityService*|*NetworkStack*|*system_server*)
                 emit "$line"
@@ -32,7 +35,6 @@ while true; do
                 ;;
         esac
     done
-    logcat_status=${PIPESTATUS:-unknown}
-    emit "logcat stream ended; pipeline status=$logcat_status; retrying in 2 seconds"
+    emit "logcat stream ended; exit=$logcat_status; retrying in 2 seconds"
     /system/bin/sleep 2
 done
