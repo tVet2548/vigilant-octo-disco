@@ -4,6 +4,14 @@ set -euo pipefail
 echo "=== Initial Disk Usage ==="
 df -h /
 
+AVAIL_KB=$(df -k --output=avail / | tail -n1 | tr -d ' ')
+AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+echo "Available root disk space before cleanup: ${AVAIL_GB} GB"
+if [ "${AVAIL_GB}" -ge 45 ]; then
+  echo "Disk budget already satisfied (>= 45 GB); skipping destructive toolchain cleanup."
+  exit 0
+fi
+
 echo "=== Removing bulky preinstalled toolchains on ubuntu-latest ==="
 rm -rf /usr/share/dotnet || true
 rm -rf /usr/local/lib/android || true

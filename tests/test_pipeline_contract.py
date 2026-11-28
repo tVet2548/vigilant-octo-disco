@@ -102,6 +102,12 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
             self.assertIn(name, smoke)
         self.assertIn('"$ADB_BIN" -s "$ADB_SERIAL" shell getprop', smoke)
 
+    def test_disk_cleanup_skips_when_runner_already_has_required_free_space(self):
+        cleanup = self.read("scripts/cleanup_disk.sh")
+        self.assertIn('AVAIL_GB=$((AVAIL_KB / 1024 / 1024))', cleanup)
+        self.assertIn('if [ "${AVAIL_GB}" -ge 45 ]; then', cleanup)
+        self.assertIn('skipping destructive toolchain cleanup', cleanup)
+
     def test_ci_drmfb_hwc_requires_a_real_framebuffer(self):
         patch = self.read("scripts/patch_system_img.sh")
         self.assertIn('HAS_FB=0', patch)
