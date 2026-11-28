@@ -21,6 +21,8 @@ class QemuAndroidPipelineContractTests(unittest.TestCase):
         self.assertIn('"-device", "virtio-vga", "-display", "sdl,gl=off"', source)
         self.assertIn("-display sdl,gl=off", smoke)
         self.assertIn("xvfb-run -a", smoke)
+        workflow = self.read(".github/workflows/build.yml")
+        self.assertIn("qemu-system-gui", workflow)
         self.assertIn("setsid xvfb-run -a", smoke)
         self.assertIn('kill -TERM -- "-$qpid"', smoke)
         self.assertNotIn("-display none", smoke)
